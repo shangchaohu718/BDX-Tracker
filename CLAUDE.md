@@ -89,8 +89,12 @@ BaseTask → LeggedRobotBase → LeggedRobotMotions (main training env)
 
 ### Data
 
-- `humanoidverse/data/lafan_29dof.pkl` — evaluation motion data (Git LFS)
-- `humanoidverse/data/lafan_29dof_10s-clipped.pkl` — training motion data (Git LFS)
+- `humanoidverse/data/lafan_29dof.zip` — manually extract to `humanoidverse/data/` to get the two pkl files below:
+  ```bash
+  unzip humanoidverse/data/lafan_29dof.zip -d humanoidverse/data/
+  ```
+- `humanoidverse/data/lafan_29dof.pkl` — evaluation motion data
+- `humanoidverse/data/lafan_29dof_10s-clipped.pkl` — training motion data
 - If LFS fails: https://huggingface.co/LeCAR-Lab/BFM-Zero/tree/main/data
 
 ### Key Dependencies
