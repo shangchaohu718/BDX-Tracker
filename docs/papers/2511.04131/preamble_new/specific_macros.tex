@@ -1,0 +1,80 @@
+%!TEX root = ../main.tex
+
+% Custom ref commands
+\Crefname{component}{Component}{Components}
+\Crefname{contribution}{Contribution}{Contributions}
+\newcommand{\componentref}[1]{%
+  \hyperref[#1]{C\ref*{#1}}%
+}
+\Crefname{claim}{Claim}{Claims}
+\Crefname{property}{Property}{Properties}
+
+% Hypothesis commands
+\newcommand{\hyp}[1]{{\color{hyppurple}{H#1}}}
+\newcommand{\hypanchor}[1]{\hypertarget{hyp:#1}{\hyp{#1}}} % place anchor
+\newcommand{\hypref}[1]{\hyperlink{hyp:#1}{\hyp{#1}}}     % clickable reference
+
+% ICLR paragraph formatting
+\newcommand{\iclrpar}[1]{\paragraph{\takeawaybold{#1}}}
+
+% ICLR style for equations (smaller text in ICLR format)
+\iftoggle{iclr}
+{
+  \newcommand{\iclrstyle}{\textstyle}
+}
+{
+  \newcommand{\iclrstyle}{}
+}
+
+% Theorem text formatting
+\newcommand{\thmbolddark}[1]{{\color{\thmcolordark}\textbf{#1}}}
+
+% Math operators
+\newcommand{\stopgrad}{\mathrm{sg}}
+
+\newcommand{\flowpol}{\pi}
+\newcommand{\piideal}{\pi^{\star}}
+\newcommand{\flowideal}{b^{\star}}
+
+\newcommand{\Gsmooth}{\cG_{\mathrm{smooth}}}
+\newcommand{\fbar}{\bar{f}}
+\newcommand{\beps}{\bm{\epsilon}}
+\newcommand{\betabar}{\bar{\beta}}
+\newcommand{\minprobcost}[1][\cost]{\minmax_{#1,\mathrm{prob}}}
+\newcommand{\sampreg}[1][n]{S_{#1,\mathrm{reg}}}
+\newcommand{\regfam}{$k$-dimensional regression problem class}
+\newcommand{\kappaconc}{\kappa}
+\newcommand{\deltaconc}{\delta}
+\newcommand{\nconc}{n_{0}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Disz}[1][z]{\Dist_{\{Z=#1\}}}
+\newcommand{\angs}[2]{\left \langle #1,#2 \right \rangle}
+\newcommand{\absangs}[2]{\left|\left \langle #1,#2 \right \rangle\right|}
+
+\newcommand{\ddt}{\frac{\rmd }{\rmd t}}
+\renewcommand{\Normal}{\mathrm{N}}
+
+\newcommand{\Dist}{D}
+
+% Metadata commands (inspired by fairmeta.cls)
+\makeatletter
+% Helper command to add items to a list
+\newcommand\addtometadatalist[5][]{%
+  \begingroup
+  \if\relax#3\relax\def\sep{}\else\def\sep{#5}\fi
+  \let\protect\@unexpandable@protect
+  \xdef#3{\expandafter{#3}\sep #4[#1]{#2}}%
+  \endgroup
+}
+
+% Metadata list and format
+\newcommand\metadatalist{}
+\newcommand\metadataformat[2][]{{\small \textbf{#1:} #2}}
+\newcommand\metadata[2][]{\addtometadatalist[#1]{#2}{\metadatalist}{\metadataformat}{\\}}
+\makeatother
+
+% Convenience commands for common metadata
+\newcommand{\paperwebsite}[1]{\metadata[Website]{\url{#1}}}
+\newcommand{\papercode}[1]{\metadata[Code]{\url{#1}}}
+\newcommand{\paperdocs}[1]{\metadata[Documentation]{\url{#1}}}
+\newcommand{\paperblog}[1]{\metadata[Blog]{\url{#1}}}

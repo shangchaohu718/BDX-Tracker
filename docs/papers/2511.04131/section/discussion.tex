@@ -1,0 +1,9 @@
+\section{Discussion}\label{sec:discussion}
+\vspace{-2mm}
+In this paper we showed for the first time that off-policy unsupervised RL is a viable approach to train a behavioral foundation model for whole-body control of a real humanoid robot. While \method shows a remarkable level of generalization and robustness, it still suffers from several limitations: \textbf{1)} The scope and performance of the behaviors expressed by \method is connected to the motions used in training. Investigating the connection between the size of motion datasets, simulated datasets, architecture and model performance (e.g., quantity and quality of the learned behaviors) and consolidating it into scaling laws is important to guide future iterations of this approach. \textbf{2)} While history-based actor and critics and domain randomization reduced the sim-to-real gap, we believe algorithms with better online adaptation capabilities are needed to reliably express more complex movements. \textbf{3)} While we performed a preliminary investigation of test-time adaptation, a more thorough understanding of fast adaptation and fine-tuning of these models is needed to broaden their practical applicability.
+
+\section{Acknowledgment}
+\vspace{-2mm}
+We would like to thank Tairan He and Haotian Lin for valuable discussions, and Chenyuan Hu for assistance with the experiments. Guanya Shi holds concurrent appointments as
+an Assistant Professor at Carnegie Mellon University and as an Amazon Scholar. This paper describes work performed at Carnegie Mellon University and is not associated with Amazon.
+%Another interesting venue is to enhance the algorithm with unsupervised exploration strategies to progressively expand its behaviors beyond the training motions. \textbf{2)} 

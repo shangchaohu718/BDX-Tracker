@@ -1,0 +1,167 @@
+\documentclass[11pt]{article}
+\pdfoutput=1
+\usepackage{etoolbox,verbatim}
+\usepackage{subcaption}
+\newtoggle{arxiv}
+\toggletrue{arxiv}
+\newtoggle{colt}
+\togglefalse{colt}
+\newtoggle{iclr}
+\togglefalse{iclr}
+\newtoggle{customthms}
+\toggletrue{customthms}
+\iftoggle{iclr}{
+\usepackage{iclr2026_conference,times}
+}{}
+
+\input{preamble_new/_preamble_includes.tex}
+
+% \input{preamble_new/header}
+% \input{preamble_new/characters}
+% \input{preamble_new/algnames}
+
+% \input{preamble_new/general_macros}
+% \input{preamble_new/specific_macros}
+% \usepackage{preamble_new/color-edits}
+\usepackage{adjustbox}
+\usetikzlibrary{calc}
+% \addauthor{ms}{magenta}
+% \addauthor{cp}{blue}
+% \addauthor{nch}{cyan}
+% \addauthor{ga}{pink}
+% \addauthor{gs}{green}
+\setlength{\parindent}{0em}
+\setlength{\parskip}{0.9em}
+
+% color set for the paper
+% \usepackage[colorlinks=true,linkcolor=contrarycolor,urlcolor=contrarycolor,citecolor=contrarycolor,breaklinks]{hyperref}
+
+
+% Custom maketitle (without metadata, which goes after abstract)
+\makeatletter
+\renewcommand{\maketitle}{
+    \newpage
+    \null
+    %\vskip 2em
+    \begingroup
+    \raggedright
+    %\let\footnote\@gobble
+    {\LARGE \bfseries \@title \par}
+    \vskip 1.5em
+    {\large
+    \lineskip .5em
+    \begin{tabular}[t]{l}
+    \@author
+    \end{tabular}\par}
+    \vskip 1em
+    {\large \@date \par}
+    \endgroup
+    \par
+    \vskip 1.5em
+}
+\makeatother
+\input{math_commands.tex}
+\input{macros}
+\title{BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning}
+
+\author{\small
+Yitang Li\textsuperscript{${1}$, }\footnote{Work done during internships at Carnegie Mellon University. The authors are now with Tsinghua University. \label{foot:thu}}\textsuperscript{, $*$} ~
+Zhengyi Luo\textsuperscript{${1}$}\textsuperscript{, $*$} ~
+Tonghe Zhang\textsuperscript{${1}$}\textsuperscript{, $\$$} ~
+Cunxi Dai\textsuperscript{${1}$}\textsuperscript{, $\$$} ~
+Andrea Tirinzoni\textsuperscript{${2}$} ~
+Anssi Kanervisto\textsuperscript{${2}$}\\
+\small
+Haoyang Weng\textsuperscript{${1}$, \ref{foot:thu}} ~
+Kris Kitani\textsuperscript{${1}$} ~
+Mateusz Guzek\textsuperscript{${2}$} ~
+Ahmed Touati\textsuperscript{${2}$} ~
+Alessandro Lazaric\textsuperscript{${2}$} \\
+\small
+Matteo Pirotta\textsuperscript{${2}$, $\dagger$} ~
+Guanya Shi\textsuperscript{${1}$, $\dagger$} ~ \\
+\small 
+\vspace{-.3em}
+ \rule{.38\textwidth}{.7pt}
+\\
+\footnotesize
+$^{*}$Equal Contribution. $^{\$}$Equal Contribution. $^\dagger$Equal advising.  \\
+\footnotesize $^{1}$Carnegie Mellon University ~~
+$^{2}$Meta ~~
+}
+
+% \date{\today}
+\date{\vspace{-0.5cm}}
+
+% Metadata
+\paperwebsite{https://lecar-lab.github.io/BFM-Zero/}
+% \papercode{https://github.com/simchowitzlabpublic/much-ado-about-noising}
+% \paperdocs{https://simchowitzlabpublic.github.io/much-ado-about-noising/}
+% \paperblog{https://your-blog.com/post}  % Commented out for now
+\usepackage{tikz}
+\usepackage[dvipsnames,table,svgnames]{xcolor}
+\usepackage{tcolorbox}
+\makeatletter
+\providecommand\sf@counterlist{}
+\makeatother
+\begin{document}
+\begin{tcolorbox}[
+    colback=blue!60!gray!5, colframe=gray!50,
+    boxrule=0pt,
+    arc=2mm%title=\bfseries Document Information
+  ]
+  \maketitle
+  \vspace{-1em}
+  \tcbline
+
+  \begin{minipage}[t]{1.0\linewidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{image/teaser_final.pdf}
+    \captionof{figure}{ \small \method{} enables versatile and robust whole-body skills.
+    (A-C) Diverse zero-shot inference methods. (D) Natural recovery from large perturbation. (E) Few-shot adaptation.}
+    \label{figure_1_teaser}
+\end{minipage}
+  \tcbline
+  \vspace{-1em}
+  % Metadata section (after abstract, inside tcolorbox)
+  \vskip 0.5cm
+  \makeatletter
+  \ifdefempty{\metadatalist}{}{\metadatalist\par}
+  \makeatother
+\end{tcolorbox}
+
+  
+\begin{abstract}
+Building Behavioral Foundation Models (BFMs) for humanoid robots has the potential to unify diverse control tasks under a single, promptable generalist policy. 
+However, existing approaches are either exclusively deployed on simulated humanoid characters, or specialized to specific tasks such as tracking. 
+We propose \method{}, a framework that learns an effective shared latent representation that embeds motions, goals, and rewards into a common space, enabling a single policy to be prompted for multiple downstream tasks without retraining. 
+% What we unlock in real world
+This well-structured latent space in \method{} enables versatile and robust whole-body skills on a Unitree G1 humanoid in the real world, via diverse inference methods, including zero-shot motion tracking, goal reaching, and reward inference, and few-shot optimization-based adaptation.
+Unlike prior on-policy reinforcement learning (RL) frameworks, \method{} builds upon recent advancements in unsupervised RL and Forward-Backward (FB) models, which offer an objective-centric, explainable, and smooth latent representation of whole-body motions.
+We further extend \method{} with critical reward shaping, domain randomization, and history-dependent asymmetric learning to bridge the sim-to-real gap. 
+Those key design choices are quantitatively ablated in simulation.
+A first-of-its-kind model, \method{} establishes a step toward scalable, promptable behavioral foundation models for whole-body humanoid control.\\%Videos: \url{http://bfm-zero-anonymous.pages.dev}
+\end{abstract}
+
+\input{section/intro}
+% \input{section/preliminaries}
+\input{section/method}
+\input{section/experiments}
+\input{section/discussion}
+{
+  % \bibliographystyle{iclr2026_conference}
+
+\bibliography{iclr2026_conference}
+\bibliographystyle{plainnat}
+}
+\newpage
+
+\tableofcontents
+\newpage
+\appendix
+\input{section/app_related_work}
+\input{section/app_method}
+\input{section/app_extra_results}
+
+
+\end{document}

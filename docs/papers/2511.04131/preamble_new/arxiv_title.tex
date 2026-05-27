@@ -1,0 +1,26 @@
+\makeatletter
+\renewcommand{\abstractname}{\normalsize Abstract}
+\makeatother
+
+\makeatletter
+\renewcommand{\maketitle}{
+    \newpage
+    \null
+    %\vskip 2em
+    \begingroup
+    \raggedright
+    %\let\footnote\@gobble
+    {\LARGE \bfseries \@title \par}
+    \vskip 1.5em
+        {\large
+            \lineskip .5em
+            \begin{tabular}[t]{l}
+                \@author
+            \end{tabular}\par}
+    \vskip 1em
+        {\large \@date \par}
+    \endgroup
+    \par
+    \vskip 1.5em
+}
+\makeatother
