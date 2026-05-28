@@ -97,6 +97,11 @@ BaseTask → LeggedRobotBase → LeggedRobotMotions (main training env)
 - `humanoidverse/data/lafan_29dof_10s-clipped.pkl` — training motion data
 - If LFS fails: https://huggingface.co/LeCAR-Lab/BFM-Zero/tree/main/data
 
+### Docs
+
+- `docs/papers/` — BFM-Zero paper (ICLR 2026 submission) LaTeX source and figures
+- `docs/research/2511.04131/` — Structured research notes: paper overview, methodology, technical innovations, implementation details, experimental results, comparisons, limitations, and reproduction guide
+
 ### Key Dependencies
 
 Isaac Sim/Lab (Linux only, via nvidia pypi), MuJoCo, PyTorch, Hydra, Pydantic, tyro, exca, wandb, tensordict.
