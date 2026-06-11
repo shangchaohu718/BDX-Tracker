@@ -68,7 +68,14 @@ The model contains:
 
 ### Simulator Abstraction (simulator/)
 
-`BaseSimulator` (abstract base) defines the interface: `setup()`, `load_assets()`, `create_envs()`, `apply_torques_at_dof()`, `simulate_at_each_physics_step()`, `render()`. Implementations: `isaacsim/`, `mujoco/`, `genesis/`, `isaacgym/`.
+`BaseSimulator` (abstract base) defines the interface: `setup()`, `load_assets()`, `create_envs()`, `apply_torques_at_dof()`, `simulate_at_each_physics_step()`, `render()`. Implementations: `isaacsim/`, `mujoco/`, `mujoco_warp/`, `genesis/`, `isaacgym/`.
+
+**MuJoCo Warp** (`mujoco_warp/`) — GPU-accelerated batched MuJoCo via NVIDIA Warp. Runs thousands of parallel environments on any CUDA GPU (no RT cores needed). Key design notes:
+- Uses `wp.to_torch()` for GPU-direct tensor reads/writes (shared memory, zero-copy)
+- Convention follows MuJoCo backend exactly (just adds batch dim): `robot_root_states` applies `quat_rotate` for body-frame angular velocity; `set_actor_root_state_tensor` undoes it with `quat_rotate_inverse`
+- CUDA graph capture after 5 warmup steps for ~2x speedup
+- Config: `humanoidverse/config/simulator/mujoco_warp.yaml`
+- Train with: `simulator=mujoco_warp` hydra override
 
 ### Environment Layer (envs/)
 
@@ -104,4 +111,13 @@ BaseTask → LeggedRobotBase → LeggedRobotMotions (main training env)
 
 ### Key Dependencies
 
-Isaac Sim/Lab (Linux only, via nvidia pypi), MuJoCo, PyTorch, Hydra, Pydantic, tyro, exca, wandb, tensordict.
+Isaac Sim/Lab (Linux only, via nvidia pypi), MuJoCo, MuJoCo Warp, PyTorch, Hydra, Pydantic, tyro, exca, wandb, tensordict.
+
+## Remote H20-3e Deployment
+
+- **Host**: `ai.docker.tcl.com` port `30723` (SSH, password in `/tmp/ssh_pass.sh`)
+- **Project dir**: `/root/epfs/tcl/bdx_BFMzero/` (verify with `ls` before any operations)
+- **No `uv` on remote** — use `.venv/bin/python -m pip` for package installs
+- **GPU**: NVIDIA H20-3e (143 GB VRAM, Hopper arch, no RT cores — MuJoCo Warp is the only GPU-accelerated path)
+- **Training**: use `simulator=mujoco_warp` hydra override
+- **Files deployed**: `simulator/mujoco_warp/`, `config/simulator/mujoco_warp.yaml`, dispatch fix in `legged_robot_base.py`

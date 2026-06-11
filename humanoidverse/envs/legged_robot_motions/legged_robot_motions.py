@@ -398,7 +398,7 @@ class LeggedRobotMotions(LeggedRobotBase):
         self.log_dict["joint_pos_diff_norm"] = joint_pos_diff_norm
     
     def _draw_debug_vis(self):
-        if self.config.simulator.config.name == 'mujoco':
+        if self.config.simulator.config.name in ('mujoco', 'mujoco_warp'):
             return
         if not self.headless:
             self.simulator.clear_lines()
@@ -498,6 +498,8 @@ class LeggedRobotMotions(LeggedRobotBase):
             elif self.config.simulator.config.name == 'genesis':
                 self.target_robot_root_states[env_ids, 3:7] = quat_mul(self.small_random_quaternions(ref_root_rot.shape[0], root_rot_noise), ref_root_rot, w_last=True)
             elif self.config.simulator.config.name == 'mujoco':
+                self.target_robot_root_states[env_ids, 3:7] = quat_mul(self.small_random_quaternions(ref_root_rot.shape[0], root_rot_noise), ref_root_rot, w_last=True)
+            elif self.config.simulator.config.name == 'mujoco_warp':
                 self.target_robot_root_states[env_ids, 3:7] = quat_mul(self.small_random_quaternions(ref_root_rot.shape[0], root_rot_noise), ref_root_rot, w_last=True)
             else:
                 raise NotImplementedError

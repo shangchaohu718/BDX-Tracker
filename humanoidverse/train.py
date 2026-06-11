@@ -664,7 +664,7 @@ def train_bfm_zero():
             aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_ankle_roll', 'penalty_slippage'],
             aux_rewards_scaling={'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0},
             cudagraphs=False,
-            compile=True
+            compile=False
         ),
         motions='',
         motions_root='',
@@ -680,7 +680,7 @@ def train_bfm_zero():
             disable_domain_randomization=False,
             relative_config_path='exp/bfm_zero/bfm_zero',
             include_last_action=True,
-            hydra_overrides=['robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
+            hydra_overrides=['simulator=mujoco_warp', 'robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,

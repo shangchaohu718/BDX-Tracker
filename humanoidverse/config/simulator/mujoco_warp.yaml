@@ -1,0 +1,24 @@
+# @package _global_
+
+simulator:
+  _target_: humanoidverse.simulator.mujoco_warp.mujoco_warp.MuJoCoWarp
+  _recursive_: False
+  config:
+    name: "mujoco_warp"
+    terrain: ${terrain}
+    plane:
+      static_friction: 1.0
+      dynamic_friction: 1.0
+      restitution: 0.0
+    sim:
+      fps: 200
+      control_decimation: 4
+      substeps: 1
+      nconmax: 256
+      njmax: 1024
+      render_mode: null
+      render_interval: 1
+      use_cuda_graph: true
+    scene:
+      num_envs: ${num_envs}
+      env_spacing: ${env.config.env_spacing}

@@ -283,7 +283,7 @@ class LeggedRobotBase(BaseTask):
             self.simulator.simulate_at_each_physics_step()
 
     def _apply_force_in_physics_step(self):
-        if self.config.simulator.config.name == "isaacgym" or self.config.simulator.config.name == "mujoco":
+        if self.config.simulator.config.name in ("isaacgym", "mujoco", "mujoco_warp"):
             self.torques = self._compute_torques(self.actions_after_delay).view(self.torques.shape)
             self.simulator.apply_torques_at_dof(self.torques)
         elif self.config.simulator.config.name == "isaacsim":
@@ -909,16 +909,22 @@ class LeggedRobotBase(BaseTask):
             self.push_robot_vel_buf[env_ids] = torch_rand_float(-max_vel, max_vel, (len(env_ids), 2), device=str(self.device)) # lin vel x/y
             self.record_push_robot_vel_buf[env_ids] = self.push_robot_vel_buf[env_ids].clone()
             # Add push velocity to root velocity to emulate the isaacsim
-            if self.config.simulator.config.name == "mujoco":
+            if self.config.simulator.config.name in ("mujoco",):
                 self.simulator.data.qvel[0:2] += self.push_robot_vel_buf[0].cpu().numpy()
                 # Add angular velocity if needed
                 if angular_max_vel > 0.0:
                     ang_push = torch_rand_float(-angular_max_vel, angular_max_vel, (len(env_ids), 3), device=str(self.device))
                     self.simulator.data.qvel[3:6] += ang_push[0].cpu().numpy()
+            elif self.config.simulator.config.name == "mujoco_warp":
+                # Batched: modify qvel directly via wp.to_torch
+                from warp import to_torch as wp_to_torch
+                qvel = wp_to_torch(self.simulator.d.qvel)
+                qvel[env_ids, 0:2] += self.push_robot_vel_buf[env_ids]
+                if angular_max_vel > 0.0:
+                    ang_push = torch_rand_float(-angular_max_vel, angular_max_vel, (len(env_ids), 3), device=str(self.device))
+                    qvel[env_ids, 3:6] += ang_push
             else:
                 self.simulator.robot_root_states[env_ids, 7:9] += self.push_robot_vel_buf[env_ids]
-                if angular_max_vel > 0.0:
-                    raise NotImplementedError()
             self.target_robot_root_states = self.simulator.robot_root_states
             self.target_robot_dof_state[..., 0] = self.simulator.dof_pos
             self.target_robot_dof_state[..., 1] = self.simulator.dof_vel

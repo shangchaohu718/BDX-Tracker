@@ -23,6 +23,7 @@ dependencies = [
     "mediapy>=1.2.3",
     "ml-collections>=1.1.0",
     "mujoco>=3.3.1",
+    "mujoco-warp>=0.1.0",
     "notebook>=7.4.2",
     "numpy-stl>=3.2.0",
     "onnx>=1.16.1",
