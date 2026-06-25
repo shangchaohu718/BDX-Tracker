@@ -13,7 +13,7 @@ from torch.utils._pytree import tree_map
 
 from ..base import BaseConfig
 from ..fb.agent import FBAgent, FBAgentTrainConfig
-from ..nn_models import _soft_update_params, eval_mode
+from ..nn_models import _soft_update_params, eval_mode, grad_norm  # [BFM-DIAG-NAN] grad_norm added by Claude
 from ..pytree_utils import tree_get_batch_size
 from .model import FBcprModel, FBcprModelConfig
 
@@ -352,6 +352,7 @@ class FBcprAgent(FBAgent):
 
         self.discriminator_optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        disc_grad_norm = grad_norm(self._model._discriminator.parameters()).detach()  # [BFM-DIAG-NAN] added by Claude
         self.discriminator_optimizer.step()
 
         with torch.no_grad():
@@ -359,6 +360,8 @@ class FBcprAgent(FBAgent):
                 "disc_loss": loss.detach(),
                 "disc_expert_loss": expert_loss.detach().mean().detach(),
                 "disc_train_loss": unlabeled_loss.detach().mean().detach(),
+                "disc_grad_norm": disc_grad_norm,  # [BFM-DIAG-NAN] added by Claude
+                "disc_ok": torch.isfinite(loss).float(),  # [BFM-DIAG-NAN]
             }
             if grad_penalty is not None:
                 output_metrics["disc_wgan_gp_loss"] = wgan_gp.detach()
@@ -391,6 +394,7 @@ class FBcprAgent(FBAgent):
         # optimize critic
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
+        critic_grad_norm = grad_norm(self._model._critic.parameters()).detach()  # [BFM-DIAG-NAN] added by Claude
         self.critic_optimizer.step()
 
         with torch.no_grad():
@@ -401,6 +405,8 @@ class FBcprAgent(FBAgent):
                 "unc_Q": Q_unc.mean().detach(),
                 "critic_loss": critic_loss.mean().detach(),
                 "mean_disc_reward": reward.mean().detach(),
+                "critic_grad_norm": critic_grad_norm,  # [BFM-DIAG-NAN] added by Claude
+                "critic_ok": torch.isfinite(critic_loss).float(),  # [BFM-DIAG-NAN]
             }
         return output_metrics
 

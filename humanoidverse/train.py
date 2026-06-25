@@ -179,6 +179,13 @@ def create_agent_or_load_checkpoint(work_dir: Path, cfg: TrainConfig, agent_buil
 
 
 def init_wandb(cfg: TrainConfig):
+    # Offline mode: no internet on remote. Logs locally to ./_wandb/,
+    # sync later with `wandb sync _wandb/wandb/offline-run-*` when online.
+    os.environ.setdefault("WANDB_MODE", "offline")
+    os.environ.setdefault("WANDB_DIR", "./_wandb")
+    os.environ.setdefault("WANDB_DISABLE_GIT", "true")
+    os.environ.setdefault("WANDB_DISABLE_CODE", "true")
+    os.makedirs("./_wandb", exist_ok=True)
     exp_name = "BFM-Zero"
     wandb_name = exp_name
     wandb_config = cfg.model_dump()
@@ -258,6 +265,69 @@ class Workspace:
         self.start_time = time.time()
         self.train_online()
 
+    def _diag_buffer_finiteness(self, storage, prefix: str = "") -> str:
+        # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
+        # Scan every leaf tensor in a buffer storage tree and report NaN/inf counts.
+        lines = []
+        totals = {"nan": 0, "inf": 0, "elem": 0}
+
+        def _scan(d, pfx):
+            for k, v in d.items():
+                key = f"{pfx}/{k}" if pfx else k
+                if isinstance(v, dict):
+                    _scan(v, key)
+                elif torch.is_tensor(v):
+                    vt = v.float()
+                    n_nan = int(torch.isnan(vt).sum().item())
+                    n_inf = int(torch.isinf(vt).sum().item())
+                    totals["nan"] += n_nan
+                    totals["inf"] += n_inf
+                    totals["elem"] += vt.numel()
+                    flag = "OK " if (n_nan == 0 and n_inf == 0) else "BAD"
+                    has_fin = torch.isfinite(vt).any().item()
+                    _mn = float(vt[torch.isfinite(vt)].min().item()) if has_fin else float("nan")
+                    _mx = float(vt[torch.isfinite(vt)].max().item()) if has_fin else float("nan")
+                    lines.append(f"  [{flag}] {key:38s} shape={str(tuple(v.shape)):20s} NaN={n_nan:>8d} inf={n_inf:>8d} min={_mn:+.4e} max={_mx:+.4e}")
+
+        _scan(storage, prefix)
+        header = f"  total elements={totals['elem']}, NaN={totals['nan']}, inf={totals['inf']}"
+        return header + "\n" + "\n".join(lines)
+
+    def _diag_do_snapshot(self, t, replay_buffer, label: str):
+        # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
+        # Save the full pre-update state (train buffer + one fixed expert batch + agent
+        # incl. normalizer + RNG) to work_dir/debug_snapshot/, print a finiteness summary, exit.
+        import pickle
+        import random
+        import sys
+        snap_dir = self.work_dir / "debug_snapshot"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        replay_buffer["train"].save(snap_dir / "train_buffer")  # re-sampleable offline
+        with torch.no_grad():  # expert buffer is not serializable -> save one fixed batch
+            _expert_batch = replay_buffer["expert_slicer"].sample(self.agent.cfg.train.batch_size)
+            _expert_batch = tree_map(lambda x: x.detach().cpu(), _expert_batch)
+        torch.save(_expert_batch, snap_dir / "expert_batch.pt")
+        self.agent.save(str(snap_dir / "agent"))  # model + optimizers + config + normalizer (pre-update, at init)
+        _rng = {
+            "t": int(t), "label": label,
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all(),
+            "numpy": np.random.get_state(),
+            "python": random.getstate(),
+            "train_buffer_len": len(replay_buffer["train"]),
+            "buffer_device": self.cfg.buffer_device,
+            "batch_size": self.agent.cfg.train.batch_size,
+        }
+        with open(snap_dir / "rng_states.pkl", "wb") as _f:
+            pickle.dump(_rng, _f)
+        _nf = self._diag_buffer_finiteness(replay_buffer["train"].storage)
+        print(f"[BFM-DIAG-SNAPSHOT] ({label}) saved pre-update state to {snap_dir} (t={t}, "
+              f"train_rows={len(replay_buffer['train'])}, expert_batch={self.agent.cfg.train.batch_size}).", flush=True)
+        print(f"[BFM-DIAG-SNAPSHOT] ({label}) raw buffer finiteness:\n{_nf}", flush=True)
+        self._diag_snapshot_done = True
+        print(f"[BFM-DIAG-SNAPSHOT] ({label}) exiting after snapshot capture.", flush=True)
+        sys.exit(0)
+
     def train_online(self) -> None:
         if self.training_with_expert_data:
             if self.cfg.load_isaac_expert_data:
@@ -325,6 +395,24 @@ class Workspace:
         eval_time_checker = EveryNStepsChecker(self._checkpoint_time, self.cfg.eval_every_steps)
         update_agent_time_checker = EveryNStepsChecker(self._checkpoint_time, self.cfg.update_agent_every)
         log_time_checker = EveryNStepsChecker(self._checkpoint_time, self.cfg.log_every_updates)
+        # [BFM-OPS] resume-without-buffer warmup. When continuing from a model checkpoint that did NOT
+        # save its replay buffer (checkpoint_buffer=False), the trajectory buffer starts empty and
+        # sample() raises until it holds trajectories >= seq_length. So we push the no-update seed gate
+        # out to num_seed_steps PAST the resume point: policy rollouts (we have a trained policy, since
+        # t >= num_seed_steps) refill the buffer, then updates resume. No-op for fresh runs
+        # (_checkpoint_time == 0) and for resumes that DID load a buffer -- fully backward compatible.
+        _buffer_was_loaded = (checkpoint_dir / "buffers" / "train").exists()
+        _seed_gate = (
+            self._checkpoint_time + self.cfg.num_seed_steps
+            if (self._checkpoint_time > 0 and not _buffer_was_loaded)
+            else self.cfg.num_seed_steps
+        )
+        if _seed_gate != self.cfg.num_seed_steps:
+            print(
+                f"[BFM-OPS] bufferless resume: refilling replay buffer with policy rollouts, updates gated "
+                f"until t > {_seed_gate} (resume_point={self._checkpoint_time}, +{self.cfg.num_seed_steps} warmup steps).",
+                flush=True,
+            )
 
         eval_instances = []
         for evaluation_name in self.evaluations.keys():
@@ -492,10 +580,43 @@ class Workspace:
                 raise NotImplementedError("still some work to do for gymnasium < 1.0")
             replay_buffer["train"].extend(data)
 
-            if len(replay_buffer["train"]) > 0 and t > self.cfg.num_seed_steps and update_agent_time_checker.check(t):
+            # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
+            # Capture point A (default): END of the random-action seed phase (pure random rollouts).
+            # Active only when BFM_ZERO_SNAPSHOT_AT=seed.
+            if (
+                os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1"
+                and os.environ.get("BFM_ZERO_SNAPSHOT_AT", "seed") == "seed"
+                and not getattr(self, "_diag_snapshot_done", False)
+                and t < self.cfg.num_seed_steps
+                and (t + self.cfg.online_parallel_envs) >= self.cfg.num_seed_steps
+            ):
+                self._diag_do_snapshot(t, replay_buffer, label="end-of-seed (pure random)")
+
+            if len(replay_buffer["train"]) > 0 and t > _seed_gate and update_agent_time_checker.check(t):
                 update_agent_time_checker.update_last_step(t)
+                # [BFM-DIAG-SNAPSHOT] capture point B: right BEFORE the FIRST update (seed + policy data).
+                # Active only when BFM_ZERO_SNAPSHOT_AT=first_update. Reproduces the state that NaN'd.
+                if (
+                    os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1"
+                    and os.environ.get("BFM_ZERO_SNAPSHOT_AT", "seed") == "first_update"
+                    and not getattr(self, "_diag_snapshot_done", False)
+                ):
+                    self._diag_do_snapshot(t, replay_buffer, label="first-update (seed + policy)")
                 for _ in range(self.cfg.num_agent_updates):
                     metrics = self.agent.update(replay_buffer, t)
+                    # [BFM-DIAG-NAN] -- instrumentation added by Claude: observe-only, print the FIRST non-finite update's breakdown once (no halt)
+                    if not getattr(self, "_diag_nan_seen", False):
+                        _nf = {}
+                        for _k, _v in metrics.items():
+                            _m = (_v if torch.is_tensor(_v) else torch.as_tensor(_v)).float().mean()
+                            if not torch.isfinite(_m):
+                                _nf[_k] = _m.item()
+                        if _nf:
+                            _full = {k: (v if torch.is_tensor(v) else torch.as_tensor(v)).float().mean().item() for k, v in metrics.items()}
+                            print(f"[BFM-DIAG-NAN] FIRST non-finite at step t={t}, update {_ + 1}/{self.cfg.num_agent_updates}. "
+                                  f"Non-finite ({len(_nf)}): {_nf}", flush=True)
+                            print(f"[BFM-DIAG-NAN] full update metrics: " + ", ".join(f"{k}={round(v, 4)}" for k, v in sorted(_full.items())), flush=True)
+                            self._diag_nan_seen = True
                     if total_metrics is None:
                         num_metrics_updates = 1
                         total_metrics = {k: metrics[k].float().clone() for k in metrics.keys()}
@@ -584,12 +705,95 @@ class Workspace:
             json.dump({"time": time}, f, indent=4)
 
 
-def train_bfm_zero():
+def train_bfm_zero(profile: str = "h20"):
+    """Launch BFM-Zero training.
+
+    Two hardware profiles are available:
+      - "h20"    : full paper network for H20-3e 143 GB data-center GPU (production)
+      - "rtx5080": small network for 16 GB consumer GPU (local dev/debug)
+
+    Each neural net (forward, backward, actor, critic, discriminator, aux_critic)
+    has its own hidden_dim / hidden_layers so they can be tuned independently.
+    """
     from humanoidverse.agents.fb_cpr_aux.model import FBcprAuxModelArchiConfig, FBcprAuxModelConfig
     from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentTrainConfig
     from humanoidverse.agents.nn_models import ForwardArchiConfig, BackwardArchiConfig, ActorArchiConfig, DiscriminatorArchiConfig, RewardNormalizerConfig
     from humanoidverse.agents.normalizers import ObsNormalizerConfig, BatchNormNormalizerConfig
     from humanoidverse.agents.nn_filters import DictInputFilterConfig
+
+    # ------------------------------------------------------------------ #
+    #  Per-network architecture + env/buffer scale for each profile.
+    #  Learning rates, reward weights, and all algorithm hyperparams are
+    #  identical (paper values) across profiles.
+    # ------------------------------------------------------------------ #
+    PROFILES = {
+        "h20": {
+            # network sizes (paper values)
+            "f_dim": 2048, "f_layers": 6,            # forward map
+            "b_dim": 256, "b_layers": 1,             # backward map (z head)
+            "actor_dim": 2048, "actor_layers": 6,
+            "critic_dim": 2048, "critic_layers": 6,
+            "disc_dim": 1024, "disc_layers": 3,      # discriminator
+            "aux_dim": 2048, "aux_layers": 6,        # aux critic
+            # env / buffer scale
+            "work_dir": "results/bfmzero-isaac-diag",
+            "batch_size": 8192,
+            "online_parallel_envs": 8192,
+            "eval_num_envs": 1024,
+            "buffer_size": 5_120_000,
+            "buffer_device": "cuda",
+        },
+        "rtx5080": {
+            # ~1/4 width, shallower → fits 16 GB
+            "f_dim": 512, "f_layers": 3,
+            "b_dim": 256, "b_layers": 1,
+            "actor_dim": 512, "actor_layers": 3,
+            "critic_dim": 512, "critic_layers": 3,
+            "disc_dim": 512, "disc_layers": 2,
+            "aux_dim": 512, "aux_layers": 3,
+            "work_dir": "results/bfmzero-isaac-rtx5080",
+            "batch_size": 512,
+            "online_parallel_envs": 256,
+            "eval_num_envs": 256,
+            "buffer_size": 1_024_000,
+            "buffer_device": "cpu",   # 16 GB: keep replay buffer on host
+        },
+    }
+    if profile not in PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Choose from {list(PROFILES)}")
+    p = PROFILES[profile]
+    # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
+    # When BFM_ZERO_SNAPSHOT=1: skip eval/prioritization, run the random-action seed
+    # phase (num_seed_steps = 10*N_env), capture the random-rollout buffer + agent at
+    # the end of seeding, then exit -- so the first agent.update() can be debugged
+    # offline without re-running the simulator. Unset = normal training (unchanged).
+    _snapshot_mode = os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1"
+    if _snapshot_mode:
+        print("[BFM-DIAG-SNAPSHOT] SNAPSHOT MODE: will capture the random-rollout buffer and exit before the first update.")
+    # [BFM-DIAG-SNAPSHOT] RESUME MODE: continue training from a captured snapshot's buffer+agent
+    # (assembled into work_dir/checkpoint/ -- see the snapshot->checkpoint assembly below),
+    # WITHOUT re-running the slow seed phase and WITHOUT eval/prioritization. BFM_ZERO_SNAPSHOT
+    # is unset so the capture block never fires; training simply resumes and proceeds.
+    _resume_mode = os.environ.get("BFM_ZERO_RESUME", "0") == "1"
+    _diag_mode = _snapshot_mode or _resume_mode
+    if _resume_mode:
+        print("[BFM-DIAG-SNAPSHOT] RESUME MODE: will load the snapshot checkpoint (buffer+agent) and continue training.")
+    # [BFM-DIAG-SNAPSHOT] use a dedicated work_dir so snapshot/resume runs are isolated from the
+    # main training dir. Override with BFM_ZERO_SNAPSHOT_DIR / BFM_ZERO_WORK_DIR respectively.
+    _work_dir = p["work_dir"]
+    if _snapshot_mode:
+        _work_dir = os.environ.get("BFM_ZERO_SNAPSHOT_DIR", _work_dir + "-snapshot")
+    elif _resume_mode:
+        _work_dir = os.environ.get("BFM_ZERO_WORK_DIR", _work_dir + "-resume")
+
+    # [BFM-DIAG-SNAPSHOT] evaluations disabled in snapshot/resume mode (also disables prioritization)
+    _evaluations = [] if _diag_mode else [
+        HumanoidVerseIsaacTrackingEvaluationConfig(
+            name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos',
+            video_name_prefix='unknown_agent', name_in_logs='humanoidverse_tracking_eval', env=None,
+            num_envs=p["eval_num_envs"], n_episodes_per_motion=1,
+        )
+    ]
 
     cfg = TrainConfig(
         name='TrainConfig',
@@ -602,12 +806,12 @@ def train_bfm_zero():
                     name='FBcprAuxModelArchiConfig',
                     z_dim=256,
                     norm_z=True,
-                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
-                    b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=256, hidden_layers=1, norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=2048, hidden_layers=6, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
-                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
-                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=1024, hidden_layers=3, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
+                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=p["f_dim"], model='residual', hidden_layers=p["f_layers"], embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=p["b_dim"], hidden_layers=p["b_layers"], norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=p["actor_dim"], hidden_layers=p["actor_layers"], embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
+                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=p["critic_dim"], model='residual', hidden_layers=p["critic_layers"], embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=p["disc_dim"], hidden_layers=p["disc_layers"], input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=p["aux_dim"], model='residual', hidden_layers=p["aux_layers"], embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
                 ),
                 obs_normalizer=ObsNormalizerConfig(
                     name='ObsNormalizerConfig',
@@ -622,7 +826,7 @@ def train_bfm_zero():
                 inference_batch_size=500000,
                 seq_length=8,
                 actor_std=0.05,
-                amp=False,
+                amp=True,  # [BFM-DIAG-SNAPSHOT] enable PyTorch bfloat16 AMP (~98% of compute is PyTorch; also cuts VRAM)
                 norm_aux_reward=RewardNormalizerConfig(name='RewardNormalizer', translate=False, scale=True)
             ),
             train=FBcprAuxAgentTrainConfig(
@@ -631,7 +835,7 @@ def train_bfm_zero():
                 lr_b=1e-05,
                 lr_actor=0.0003,
                 weight_decay=0.0,
-                clip_grad_norm=0.0,
+                clip_grad_norm=0.0,   # paper default (disabled)
                 fb_target_tau=0.01,
                 ortho_coef=100.0,
                 train_goal_ratio=0.2,
@@ -639,7 +843,7 @@ def train_bfm_zero():
                 actor_pessimism_penalty=0.5,
                 stddev_clip=0.3,
                 q_loss_coef=0.0,
-                batch_size=1024,
+                batch_size=p["batch_size"],
                 discount=0.98,
                 use_mix_rollout=True,
                 update_z_every_step=100,
@@ -680,7 +884,10 @@ def train_bfm_zero():
             disable_domain_randomization=False,
             relative_config_path='exp/bfm_zero/bfm_zero',
             include_last_action=True,
-            hydra_overrides=['simulator=mujoco_warp', 'robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
+            # [BFM-DIAG-NAN] lie_down_init_prob is env-var overridable for the bad-init-state A/B
+            # confirmation run: default 0.3 (baseline); set BFM_ZERO_LIE_DOWN_PROB=0.0 on the remote
+            # to spawn all envs upright (no lying-down penetration) and see if the sim NaN vanishes.
+            hydra_overrides=['simulator=mujoco_warp', 'robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', f'env.config.lie_down_init_prob={os.environ.get("BFM_ZERO_LIE_DOWN_PROB", "0.3")}'],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,
@@ -689,33 +896,41 @@ def train_bfm_zero():
             make_config_g1env_compatible=False,
             root_height_obs=True
         ),
-        work_dir='results/bfmzero-isaac',
+        work_dir=_work_dir,
         seed=4728,
-        online_parallel_envs=1024,
-        log_every_updates=384000,
+        online_parallel_envs=p["online_parallel_envs"],
+        log_every_updates=8192,
         num_env_steps=384000000,
         update_agent_every=1024,
-        num_seed_steps=10240,
+        num_seed_steps=p["online_parallel_envs"] * 10,  # [BFM-DIAG-SNAPSHOT] 10 random-action seed iterations, scaled with N_env
         num_agent_updates=16,
-        checkpoint_every_steps=9600000,
-        checkpoint_buffer=True,
-        prioritization=True,
+        # [BFM-OPS] checkpoint every 2M steps (~50 min at ~9.6M-steps/4h throughput) so saves land WELL
+        # inside the 4h wall-clock cutoff on this shared host. The old 9.6M value ~= 4h collided with the
+        # cutoff and produced a half-written checkpoint (model+buffer written, train_status.json never
+        # reached) on every run -- structurally unable to persist progress past the resume point.
+        checkpoint_every_steps=2000000,
+        # [BFM-OPS] do NOT checkpoint the replay buffer: it is ~13G (5.12M transitions) and on this 94G
+        # shared volume it filled the disk and corrupted a half-written save. Model + optimizer state (the
+        # learned part) are still checkpointed and resumed; the replay buffer simply re-seeds on each resume
+        # (num_seed_steps of random actions), negligible cost over a 384M-step run.
+        checkpoint_buffer=False,
+        prioritization=(not _diag_mode),  # [BFM-DIAG-SNAPSHOT] off in snapshot/resume mode (no eval)
         prioritization_min_val=0.5,
         prioritization_max_val=2.0,
         prioritization_scale=2.0,
         prioritization_mode='exp',
         use_trajectory_buffer=True,
-        buffer_size=5120000,
-        use_wandb=False,
+        buffer_size=p["buffer_size"],
+        use_wandb=True,
         wandb_ename='yitangl',  # your wandb entity (username/team), empty = default from wandb login
         wandb_gname='bfmzero-isaac',  # run group
         wandb_pname='bfmzero-isaac',  # your wandb project name
         load_isaac_expert_data=True,
-        buffer_device='cuda',
+        buffer_device=p["buffer_device"],
         disable_tqdm=True,
-        evaluations=[HumanoidVerseIsaacTrackingEvaluationConfig(name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos', video_name_prefix='unknown_agent', name_in_logs='humanoidverse_tracking_eval', env=None, num_envs=1024, n_episodes_per_motion=1)],
+        evaluations=_evaluations,
         eval_every_steps=9600000,
-        tags={},
+        tags={"profile": profile},
     )
     workspace = cfg.build()
     workspace.train()
@@ -724,6 +939,11 @@ def train_bfm_zero():
 if __name__ == "__main__":
     # This is the bare minimum CLI interface to launch experiments, but ideally you should
     # launch your experiments from Python code (e.g., see under "scripts")
-    train_bfm_zero()
+    #
+    # Profile selection via env var so it works under nohup without argparse:
+    #   BFM_ZERO_PROFILE=rtx5080 python -m humanoidverse.train   (local dev)
+    #   python -m humanoidverse.train                            (defaults to h20)
+    profile = os.environ.get("BFM_ZERO_PROFILE", "h20")
+    train_bfm_zero(profile=profile)
 
 # uv run --no-cache -m humanoidverse.meta_online_entry_point

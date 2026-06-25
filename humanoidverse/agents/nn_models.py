@@ -82,6 +82,23 @@ def _soft_update_params(net_params: tp.Any, target_net_params: tp.Any, tau: floa
     torch._foreach_add_(target_net_params, net_params, alpha=tau)
 
 
+# [BFM-DIAG-NAN] -- instrumentation added by Claude (greppable: BFM-DIAG-NAN); safe to delete to revert
+def grad_norm(params: tp.Any) -> torch.Tensor:
+    """[BFM-DIAG-NAN] Total L2 norm of gradients over an iterable of parameters.
+
+    Non-mutating (reads `.grad` only), accumulated in fp32 so bf16 autocast
+    gradients don't overflow the reduction. Used for NaN/explosion diagnostics.
+    """
+    sq = None
+    for p in params:
+        if p.grad is not None:
+            s = p.grad.detach().float().pow(2).sum()
+            sq = s if sq is None else sq + s
+    if sq is None:
+        sq = torch.tensor(0.0)
+    return sq.sqrt()
+
+
 def soft_update_params(net, target_net, tau) -> None:
     tau = float(min(max(tau, 0), 1))
     net_params = tuple(x.data for x in net.parameters())

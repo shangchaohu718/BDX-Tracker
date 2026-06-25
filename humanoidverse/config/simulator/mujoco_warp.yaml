@@ -14,11 +14,34 @@ simulator:
       fps: 200
       control_decimation: 4
       substeps: 1
+      # [BFM-DIAG-NAN] contact/constraint buffer caps. The original IsaacLab/PhysX port auto-sizes
+      # generously AND clamps penetration-recovery velocity (max_depenetration_velocity=1.0); this
+      # mujoco_warp port had neither, so a diverged rollout piled up full-body contacts and
+      # overflowed njmax (logged "please increase njmax to 1117") -> dropped rows -> penetration
+      # cascade -> sim NaN. Rather than enlarge these caps here, we remove the explosion at its
+      # source via trim_collision below (fix #3): with only ~21 colliding geoms a collapse yields
+      # ~tens of contacts, so 256/1024 has 5-10x headroom. NOTE: enlarging these caps is also an
+      # OOM trap -- mjwarp sizes the convex-CCD buffer as nconmax*nworld and the constraint
+      # Jacobian as njmax*nworld, so memory scales with the PRODUCT; tried nconmax=1024/njmax=4096
+      # and it OOM'd at 8192 worlds. The probe (BFM_ZERO_NAN_PROBE) reports nacon/nefc so we can
+      # bump here only if actually needed.
       nconmax: 256
       njmax: 1024
       render_mode: null
       render_interval: 1
       use_cuda_graph: true
+      # [BFM-DIAG-NAN] Fix #3: trim full-body collisions to the env's actually-used bodies only.
+      # The G1 ships ~39 collision geoms with self-collision on; on a collapsed rollout these
+      # generate the 100s of contacts that overflow njmax (the upstream NaN trigger). Kept bodies
+      # = feet (env contact_bodies: ankle_roll_link) + fall-detection bodies (env
+      # terminate/penalize_contacts_on: pelvis, shoulder, hip). Everything else -> visual-only.
+      # Validated: 38->21 colliding geoms; floor preserved; env contact-force consumers intact.
+      trim_collision: true
+      trim_collision_keep_bodies:
+        - ankle_roll_link   # both feet soles (env contact_bodies)
+        - pelvis            # fall detection (terminate_after_contacts_on)
+        - shoulder          # L/R shoulder pitch/roll/yaw links
+        - hip               # L/R hip pitch/roll/yaw links
     scene:
       num_envs: ${num_envs}
       env_spacing: ${env.config.env_spacing}

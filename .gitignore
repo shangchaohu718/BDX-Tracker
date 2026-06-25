@@ -5,3 +5,8 @@ __pycache__/
 *.egg-info
 /results/
 .tbot/
+
+# Fetched checkpoints, model weights, and rendered videos — large binaries, never commit
+remote_checkpoint_latest/
+*.safetensors
+*.mp4

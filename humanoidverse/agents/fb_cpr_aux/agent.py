@@ -14,7 +14,7 @@ from torch.utils._pytree import tree_map
 
 from ..base import BaseConfig
 from ..fb_cpr.agent import FBcprAgent, FBcprAgentTrainConfig
-from ..nn_models import _soft_update_params, eval_mode
+from ..nn_models import _soft_update_params, eval_mode, grad_norm  # [BFM-DIAG-NAN] grad_norm added by Claude
 from .model import FBcprAuxModelConfig
 
 
@@ -80,9 +80,45 @@ class FBcprAuxAgent(FBcprAgent):
 
             self.update_aux_critic = CudaGraphModule(self.update_aux_critic, warmup=5)
 
+    def _diag_observe_batch_finiteness(self, step, named_batches):
+        # [BFM-DIAG-NAN] -- instrumentation added by Claude: OBSERVE-ONLY sampled-batch guard.
+        # Logs the FIRST batch fed to update() that contains NaN/inf (the intermittent MuJoCo-Warp
+        # sim NaN that is the root cause of training divergence), but does NOT skip the update --
+        # the update proceeds unmodified, so training behavior is unchanged. One host-sync when the
+        # batch is finite; per-key counts only printed when something is actually non-finite.
+        counts = {}
+
+        def _scan(tree, prefix):
+            if not isinstance(tree, dict):
+                return
+            for k, v in tree.items():
+                key = f"{prefix}/{k}" if prefix else k
+                if isinstance(v, dict):
+                    _scan(v, key)
+                elif torch.is_tensor(v) and v.numel():
+                    counts[key] = (torch.isnan(v) | torch.isinf(v)).sum()
+
+        for _name, _tree in named_batches:
+            _scan(_tree, _name)
+        if not counts:
+            return
+        total = sum(counts.values()).item()
+        if total == 0:
+            return
+        bad = {k: int(v.item()) for k, v in counts.items() if v.item() > 0}
+        self._diag_batch_nf_count = getattr(self, "_diag_batch_nf_count", 0) + 1
+        if self._diag_batch_nf_count == 1:
+            print(f"[BFM-DIAG-NAN] FIRST non-finite SAMPLED BATCH at step={step}: "
+                  f"per-key non-finite counts={bad}", flush=True)
+        elif self._diag_batch_nf_count % 50 == 0:
+            print(f"[BFM-DIAG-NAN] {self._diag_batch_nf_count} non-finite sampled batches so far "
+                  f"(last at step={step})", flush=True)
+
     def update(self, replay_buffer, step: int) -> Dict[str, torch.Tensor]:
         expert_batch = replay_buffer["expert_slicer"].sample(self.cfg.train.batch_size)
         train_batch = replay_buffer["train"].sample(self.cfg.train.batch_size)
+        # [BFM-DIAG-NAN] observe-only: log the first non-finite sampled batch (no skip / no halt)
+        self._diag_observe_batch_finiteness(step, (("train", train_batch), ("expert", expert_batch)))
 
         train_obs, train_action, train_next_obs = (
             tree_map(lambda x: x.to(self.device), train_batch["observation"]),
@@ -237,6 +273,7 @@ class FBcprAuxAgent(FBcprAgent):
         # optimize critic
         self.aux_critic_optimizer.zero_grad(set_to_none=True)
         aux_critic_loss.backward()
+        aux_critic_grad_norm = grad_norm(self._model._aux_critic.parameters()).detach()  # [BFM-DIAG-NAN] added by Claude
         self.aux_critic_optimizer.step()
 
         with torch.no_grad():
@@ -247,6 +284,8 @@ class FBcprAuxAgent(FBcprAgent):
                 "unc_auxQ": Q_unc.mean().detach(),
                 "aux_critic_loss": aux_critic_loss.mean().detach(),
                 "mean_aux_reward": aux_reward.mean().detach(),
+                "aux_critic_grad_norm": aux_critic_grad_norm,  # [BFM-DIAG-NAN] added by Claude
+                "aux_critic_ok": torch.isfinite(aux_critic_loss).float(),  # [BFM-DIAG-NAN]
             }
         return output_metrics
 
@@ -284,6 +323,7 @@ class FBcprAuxAgent(FBcprAgent):
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
+        actor_grad_norm = grad_norm(self._model._actor.parameters()).detach()  # [BFM-DIAG-NAN] added by Claude
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()
@@ -294,5 +334,10 @@ class FBcprAuxAgent(FBcprAgent):
                 "Q_discriminator": Q_discriminator.mean().detach(),
                 "Q_aux": Q_aux.mean().detach(),
                 "Q_fb": Q_fb.mean().detach(),
+                # [BFM-DIAG-NAN] -- instrumentation added by Claude: scale_reg weight, |Q_fb|, actor grad norm, finite flag
+                "scale_reg_weight": weight,
+                "Q_fb_abs": Q_fb.abs().mean().detach(),
+                "actor_grad_norm": actor_grad_norm,
+                "actor_ok": torch.isfinite(actor_loss).float(),
             }
         return output_metrics

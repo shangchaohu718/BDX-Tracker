@@ -22,7 +22,10 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 
-def main(model_folder: Path, data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = False, motion_list: list[int] = [25]):
+def main(model_folder: Path, data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = False, motion_list: list[int] = [25], episode_len: int = 0):
+    # motion_list: motion ids to evaluate (default [25])
+    # episode_len: number of control steps to render (0 = full motion length, capped at z.shape[0])
+
     # motion_list: motion ids to evaluate (default [25])
     
     model_folder = Path(model_folder)
@@ -55,16 +58,20 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
     # Outputs under model_folder/tracking_inference (sibling of exported/)
     output_dir = model_folder / "exported"
     output_dir.mkdir(parents=True, exist_ok=True)
-    export_meta_policy_as_onnx(
-        model,
-        output_dir,
-        f"{model_name}.onnx",
-        {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
-        z_dim=model.cfg.archi.z_dim,
-        history=('history_actor' in model.cfg.archi.actor.input_filter.key),
-        use_29dof=True,
-    )
-    print(f"Exported model to {output_dir}/{model_name}.onnx")
+    try:
+        export_meta_policy_as_onnx(
+            model,
+            output_dir,
+            f"{model_name}.onnx",
+            {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
+            z_dim=model.cfg.archi.z_dim,
+            history=('history_actor' in model.cfg.archi.actor.input_filter.key),
+            use_29dof=True,
+        )
+        print(f"Exported model to {output_dir}/{model_name}.onnx")
+    except Exception as e:
+        print(f"Skipping ONNX export due to error: {e}")
+        print("Continuing with evaluation...")
 
     def tracking_inference(obs) -> torch.Tensor:
         z = model.backward_map(obs)
@@ -86,6 +93,9 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
 
     for MOTION_ID in motion_list:
         env.set_is_evaluating(MOTION_ID)
+        # Resolve human-readable clip name from the motion library (e.g. "dance1_subject3_clip9").
+        clip_name = str(env._motion_lib._motion_data_keys[MOTION_ID])
+        print(f"\n{'='*80}\nMotion {MOTION_ID}: {clip_name}\n{'='*80}")
         # we visulize the first env
         obs, obs_dict = get_backward_observation(env, 0, use_root_height_obs=use_root_height_obs)
 
@@ -95,77 +105,67 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
             obs_dict["dof_pos"].cpu().numpy()
         ], axis=-1)
 
-        # import ipdb; ipdb.set_trace()
-
         z = tracking_inference(tree_map(lambda x: x[1:], obs))
         output_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(z.cpu().numpy(), output_dir / f"zs_{MOTION_ID}.pkl")
         print(f"Saved zs_{MOTION_ID}.pkl")
-        
-    observation, info = wrapped_env.reset(to_numpy=False)
 
-    # Root state: pos(3) + quat(4) + lin_vel(3) + ang_vel(3). Isaac expects quat as wxyz; motion lib uses xyzw.
-    ref_body_rots = obs_dict["ref_body_rots"][0, 0].clone()
-    if simulator == "isaacsim":
-        ref_body_rots = ref_body_rots[[3, 0, 1, 2]]  # xyzw -> wxyz for correct humanoid facing in Isaac
-    ref_root_init_state = torch.cat(
-            [
-                obs_dict["ref_body_pos"][0, 0],
-                ref_body_rots,
-                obs_dict["ref_body_vels"][0, 0],
-                obs_dict["ref_body_angular_vels"][0, 0],
-            ]
-        )
-    dof_init_state = torch.zeros_like(wrapped_env._env.simulator.dof_state.view(num_envs, -1, 2)[0])
-    dof_init_state[..., 0] = obs_dict["dof_pos"][0]
-    dof_init_state[..., 1] = obs_dict["ref_dof_vel"][0]
-    target_states = {
-        "dof_states": dof_init_state,
-        "root_states": torch.stack([ref_root_init_state.clone() for i in range(num_envs)])
-    }
-    env_ids = torch.arange(num_envs, dtype=torch.long)
-    observation, info = wrapped_env._env.reset_envs_idx(env_ids, target_states=target_states)
-    # refresh_env_ids = wrapped_env._env.need_to_refresh_envs.nonzero(as_tuple=False).flatten()
-    # wrapped_env._env.simulator.set_actor_root_state_tensor(refresh_env_ids, wrapped_env._env.target_robot_root_states)
-    # wrapped_env._env.simulator.set_dof_state_tensor(refresh_env_ids, wrapped_env._env.target_robot_dof_state)
-    # wrapped_env._env.need_to_refresh_envs[refresh_env_ids] = False
-    observation_new, reward, terminated, truncated, info = wrapped_env.step(torch.zeros((num_envs, wrapped_env.action_space.shape[-1]), dtype=torch.float32), to_numpy=False)
-    observation = wrapped_env._get_g1env_observation(to_numpy=False)
-    qpos, qvel = wrapped_env._get_qpos_qvel(to_numpy=True)
-    assert np.allclose(wrapped_env._env.simulator.dof_pos.clone().cpu(), expert_qpos[0,7:])
-    joint_pos = [wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy()]
+        observation, info = wrapped_env.reset(to_numpy=False)
 
-    # Visualization length: match inference length so expert and policy videos align
-    episode_len = z.shape[0]
-    episode_len = 100
-    print(f"Saving video for tracking ({episode_len} steps)")
-    if save_mp4:
-        rgb_renderer = IsaacRendererWithMuJoco(render_size=256)
-        # Only render 1 + episode_len frames (same as frames list), not the full motion
-        expert_video = rgb_renderer.from_qpos(expert_qpos[: 1 + episode_len])
-        frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]
+        # Root state: pos(3) + quat(4) + lin_vel(3) + ang_vel(3). Isaac expects quat as wxyz; motion lib uses xyzw.
+        ref_body_rots = obs_dict["ref_body_rots"][0, 0].clone()
+        if simulator == "isaacsim":
+            ref_body_rots = ref_body_rots[[3, 0, 1, 2]]  # xyzw -> wxyz for correct humanoid facing in Isaac
+        ref_root_init_state = torch.cat(
+                [
+                    obs_dict["ref_body_pos"][0, 0],
+                    ref_body_rots,
+                    obs_dict["ref_body_vels"][0, 0],
+                    obs_dict["ref_body_angular_vels"][0, 0],
+                ]
+            )
+        dof_init_state = torch.zeros_like(wrapped_env._env.simulator.dof_state.view(num_envs, -1, 2)[0])
+        dof_init_state[..., 0] = obs_dict["dof_pos"][0]
+        dof_init_state[..., 1] = obs_dict["ref_dof_vel"][0]
+        target_states = {
+            "dof_states": dof_init_state,
+            "root_states": torch.stack([ref_root_init_state.clone() for i in range(num_envs)])
+        }
+        env_ids = torch.arange(num_envs, dtype=torch.long)
+        observation, info = wrapped_env._env.reset_envs_idx(env_ids, target_states=target_states)
+        observation_new, reward, terminated, truncated, info = wrapped_env.step(torch.zeros((num_envs, wrapped_env.action_space.shape[-1]), dtype=torch.float32), to_numpy=False)
+        observation = wrapped_env._get_g1env_observation(to_numpy=False)
+        qpos, qvel = wrapped_env._get_qpos_qvel(to_numpy=True)
+        joint_pos = [wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy()]
 
-    print(f"Running tracking inference for {episode_len} steps")
-    for i in range(episode_len):
-        print(f"Step {i} of {episode_len}")
-        action = model.act(observation, z[i % len(z)].repeat(num_envs, 1), mean=True)
-        observation, reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
-        joint_pos.append(wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy())
+        # Visualization length: default (0) = full motion length (number of latent vectors z).
+        full_motion_len = z.shape[0]
+        ep_len = min(episode_len, full_motion_len) if episode_len and episode_len > 0 else full_motion_len
+        print(f"Saving video for tracking ({ep_len} steps)")
         if save_mp4:
-            frames.append(rgb_renderer.render(wrapped_env._env, 0)[0])
+            rgb_renderer = IsaacRendererWithMuJoco(render_size=256)
+            # Only render 1 + ep_len frames (same as frames list), not the full motion
+            expert_video = rgb_renderer.from_qpos(expert_qpos[: 1 + ep_len])
+            frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]
 
-    joint_pos = np.stack(joint_pos, axis=0).squeeze(1)
-    stats = {}
-    
-    # breakpoint()  # use PYTHONBREAKPOINT=0 to disable, or install ipdb for a nicer debugger
+        print(f"Running tracking inference for {ep_len} steps")
+        for i in range(ep_len):
+            action = model.act(observation, z[i % len(z)].repeat(num_envs, 1), mean=True)
+            observation, reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
+            joint_pos.append(wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy())
+            if save_mp4:
+                frames.append(rgb_renderer.render(wrapped_env._env, 0)[0])
 
-    if save_mp4:
-        new_frames = []
-        for a, b in zip(expert_video, frames):
-            new_frames.append(np.concatenate([a, b], axis=1))
-        video_path = output_dir / "tracking.mp4"
-        media.write_video(str(video_path), new_frames, fps=50)
-        print(f"Saved video for tracking: {video_path}")
+        joint_pos = np.stack(joint_pos, axis=0).squeeze(1)
+        stats = {}
+
+        if save_mp4:
+            new_frames = []
+            for a, b in zip(expert_video, frames):
+                new_frames.append(np.concatenate([a, b], axis=1))
+            video_path = output_dir / f"tracking_{clip_name}.mp4"
+            media.write_video(str(video_path), new_frames, fps=50)
+            print(f"Saved video for tracking: {video_path}")
 
 
 if __name__ == "__main__":

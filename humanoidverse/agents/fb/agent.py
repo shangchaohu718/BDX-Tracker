@@ -17,7 +17,7 @@ from torch.utils._pytree import tree_map
 from ..base import BaseConfig
 from ..envs.utils.gym_spaces import json_to_space, space_to_json
 from ..misc.zbuffer import ZBuffer
-from ..nn_models import _soft_update_params, eval_mode, weight_init
+from ..nn_models import _soft_update_params, eval_mode, grad_norm, weight_init  # [BFM-DIAG-NAN] grad_norm added by Claude
 from .model import FBModel, FBModelConfig
 
 
@@ -272,6 +272,9 @@ class FBAgent:
         self.forward_optimizer.zero_grad(set_to_none=True)
         self.backward_optimizer.zero_grad(set_to_none=True)
         fb_loss.backward()
+        # [BFM-DIAG-NAN] -- instrumentation added by Claude: raw grad norms (pre-clip) to locate the explosion
+        fb_fwd_grad_norm = grad_norm(self._model._forward_map.parameters()).detach()
+        fb_bwd_grad_norm = grad_norm(self._model._backward_map.parameters()).detach()
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._forward_map.parameters(), clip_grad_norm)
             torch.nn.utils.clip_grad_norm_(self._model._backward_map.parameters(), clip_grad_norm)
@@ -293,6 +296,12 @@ class FBAgent:
                 "orth_loss_diag": orth_loss_diag,
                 "orth_loss_offdiag": orth_loss_offdiag,
                 "q_loss": q_loss,
+                # [BFM-DIAG-NAN] -- instrumentation added by Claude: |F|, |Q_fb| (=scale_reg weight), grad norms, finite flag
+                "F_norm": torch.norm(Fs, dim=-1).mean(),
+                "Q_fb_abs": ((Fs * z).sum(-1)).abs().mean(),
+                "fb_fwd_grad_norm": fb_fwd_grad_norm,
+                "fb_bwd_grad_norm": fb_bwd_grad_norm,
+                "fb_ok": torch.isfinite(fb_loss).float(),
             }
         return output_metrics
 
