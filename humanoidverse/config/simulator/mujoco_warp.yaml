@@ -36,7 +36,17 @@ simulator:
       # = feet (env contact_bodies: ankle_roll_link) + fall-detection bodies (env
       # terminate/penalize_contacts_on: pelvis, shoulder, hip). Everything else -> visual-only.
       # Validated: 38->21 colliding geoms; floor preserved; env contact-force consumers intact.
-      trim_collision: true
+      #
+      # [BFM-DIAG-NAN] DISABLED 2026-07-07 (trim_collision: false, both train + infer). A/B probe
+      # (BFM_CONTACT_PROBE) on a collapsing rollout showed trim does remove REAL contacts (the
+      # OFF run produces ~1-2 extra torso/limb-on-floor contacts in the collapsed phase that trim
+      # zeroes) -- it is NOT a no-op, and those contacts are exactly the fidelity distortion we
+      # don't want at eval. fell_frame was unchanged either way on the tested clip, but keeping
+      # full-body collisions is the physically-faithful choice. TRADE-OFF: at training scale (8192
+      # worlds) a deep collapse can now pile up contacts and approach njmax=1024 again; if NaNs
+      # reappear, BFM_ZERO_NAN_RESET still heals them (per-substep isfinite net), and the options
+      # are (a) re-enable this trim, or (b) raise nconmax/njmax (mind the nworld-product OOM).
+      trim_collision: false
       trim_collision_keep_bodies:
         - ankle_roll_link   # both feet soles (env contact_bodies)
         - pelvis            # fall detection (terminate_after_contacts_on)

@@ -22,7 +22,7 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 
-def main(model_folder: Path, data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = False, motion_list: list[int] = [25], episode_len: int = 0):
+def main(model_folder: Path, data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = True, motion_list: list[int] = [25], episode_len: int = 0, z_mode: str = "closedloop"):
     # motion_list: motion ids to evaluate (default [25])
     # episode_len: number of control steps to render (0 = full motion length, capped at z.shape[0])
 
@@ -74,9 +74,14 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         print("Continuing with evaluation...")
 
     def tracking_inference(obs) -> torch.Tensor:
+        # z smoothing window forced to 1 (per-frame z, no averaging). The checkpoint's
+        # seq_length (8) caused a trailing-window blend that blurred fast transitions
+        # (turn apex, crouch bottom); reverting to 1 gives the actor the exact per-frame
+        # backward_map(target) latent, which is the FB-faithful open-loop usage.
+        seq_length = 1
         z = model.backward_map(obs)
         for step in range(z.shape[0]):
-            end_idx = min(step + 1, z.shape[0])
+            end_idx = min(step + seq_length, z.shape[0])
             z[step] = z[step:end_idx].mean(dim=0)
         return model.project_z(z)
 
@@ -93,8 +98,12 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
 
     for MOTION_ID in motion_list:
         env.set_is_evaluating(MOTION_ID)
-        # Resolve human-readable clip name from the motion library (e.g. "dance1_subject3_clip9").
-        clip_name = str(env._motion_lib._motion_data_keys[MOTION_ID])
+        # MOTION_ID is the pkl index (start_idx) of the motion to load into env 0.
+        # IMPORTANT: read the clip name from the motion ACTUALLY loaded into env 0
+        # (curr_motion_keys), NOT _motion_data_keys[MOTION_ID] — that array is the
+        # full sorted key list and the index can point elsewhere after eval reload.
+        loaded_keys = getattr(env._motion_lib, "curr_motion_keys", None)
+        clip_name = str(loaded_keys[0]) if loaded_keys is not None else f"motion_{MOTION_ID}"
         print(f"\n{'='*80}\nMotion {MOTION_ID}: {clip_name}\n{'='*80}")
         # we visulize the first env
         obs, obs_dict = get_backward_observation(env, 0, use_root_height_obs=use_root_height_obs)
@@ -149,15 +158,49 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
             frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]
 
         print(f"Running tracking inference for {ep_len} steps")
+        # Measurement policy: LOG, DON'T INTERFERE. The rollout always runs the full
+        # ep_len — nothing early-stops it. We record two independent signals per frame:
+        #   - physical fall: root height < 0.3m (reported only, never breaks the loop)
+        #   - tracking loss: env motion-far termination (mean per-body error > 0.5m,
+        #     legged_robot_motions.py:142-143) — also reported only.
+        # MPJPE is the mean per-body tracking error over ALL frames (no truncation).
+        init_ref_root_h = float(obs_dict["ref_body_pos"][0, 0, 2])  # reference root height at frame 0
+        root_h_hist = []  # per-frame live root height (physical-fall log)
+        dif_norm_hist = []  # per-frame mean per-body tracking error (env's canonical dif_global_body_pos)
+        env_terminated_hist = []  # per-frame motion-far termination flag (tracking-loss log)
         for i in range(ep_len):
             action = model.act(observation, z[i % len(z)].repeat(num_envs, 1), mean=True)
             observation, reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
+            # --- log only, no early stop ---
+            env_terminated = bool(terminated[0].cpu().item()) if terminated.ndim > 0 else bool(terminated.cpu().item())
+            env_terminated_hist.append(env_terminated)
+            root_h_hist.append(float(wrapped_env._env.simulator._rigid_body_pos[0, 0, 2].cpu().item()))
+            # env already computes the aligned (31 vs 31) per-body tracking error each step
+            dif_global = wrapped_env._env.dif_global_body_pos[0]  # [num_bodies_total, 3]
+            dif_norm_hist.append(float(torch.norm(dif_global, dim=-1).mean().item()))
             joint_pos.append(wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy())
             if save_mp4:
                 frames.append(rgb_renderer.render(wrapped_env._env, 0)[0])
 
         joint_pos = np.stack(joint_pos, axis=0).squeeze(1)
-        stats = {}
+        # mean per-body tracking error over the FULL clip (no truncation by any signal)
+        mpjpe = float(np.mean(dif_norm_hist)) if dif_norm_hist else float("nan")
+        # physical-fall summary: first frame root height dropped below 0.3m, if ever
+        fell_frame = next((i for i, h in enumerate(root_h_hist) if h < 0.3), None)
+        # tracking-loss summary: first frame the env motion-far termination fired, if ever
+        lost_track_frame = next((i for i, t in enumerate(env_terminated_hist) if t), None)
+        min_root_h = float(min(root_h_hist)) if root_h_hist else float("nan")
+        stats = {
+            "clip": clip_name,
+            "motion_id": MOTION_ID,
+            "ep_len": ep_len,
+            "init_ref_root_h": init_ref_root_h,
+            "min_root_h": min_root_h,
+            "fell_frame": fell_frame,  # None = never physically fell
+            "lost_track_frame": lost_track_frame,  # None = never lost tracking
+            "mpjpe_mean": mpjpe,
+        }
+        print(f"  STATS {stats}")
 
         if save_mp4:
             new_frames = []

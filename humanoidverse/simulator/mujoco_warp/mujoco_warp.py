@@ -355,18 +355,28 @@ class MuJoCoWarp(BaseSimulator):
         # the live Warp memory (DLPack zero-copy view; proven by a direct propagation test). qpos=
         # [7 base + 29 joint], qvel=[6 base + 29 joint]. Gated by BFM_ZERO_HARD_LIMIT_CLAMP
         # (default 1 = on; =0 disables). THE actual NaN fix is BFM_ZERO_NAN_RESET below.
-        if os.environ.get("BFM_ZERO_HARD_LIMIT_CLAMP", "1") != "0" and getattr(self, "hard_dof_pos_limits", None) is not None:
-            _qp = wp.to_torch(self.d.qpos)               # [N, nq]
-            _qv = wp.to_torch(self.d.qvel)               # [N, nv]
-            _jp = _qp[:, 7:7 + self.num_dof]             # [N, 29] joint pos (LIVE view of d.qpos)
-            _lo = self.hard_dof_pos_limits[:, 0]
-            _hi = self.hard_dof_pos_limits[:, 1]
-            _past_hi = _jp > _hi                          # outbound mask BEFORE clamping
-            _past_lo = _jp < _lo
-            _jp.clamp_(min=_lo, max=_hi)                  # project joint pos into hard range (identity if in-bounds)
-            _jv = _qv[:, 6:6 + self.num_dof]             # [N, 29] joint vel (LIVE view of d.qvel)
-            _jv.masked_fill_(_past_hi & (_jv > 0), 0.0)  # kill velocity pushing further past the HI limit
-            _jv.masked_fill_(_past_lo & (_jv < 0), 0.0)  # kill velocity pushing further past the LO limit
+        #
+        # [ARCH-CHECK 2026-07-07] Verified mujoco_warp's solver ALREADY enforces joint limits via the
+        # standard soft unilateral constraint (_limit_slide_hinge kernel in mujoco_warp/_src/constraint.py:
+        # `active = (qpos - range) < 0` -> restoring force via jnt_solref/jnt_solimp). The solver does NOT
+        # hard-clamp qpos -- it applies forces, so it cannot rescue an already-infeasible (past-limit)
+        # start state, which is the only thing this custom clamp did. Joint-limit enforcement is the
+        # simulator's job and the solver does it; this wrapper-level qpos patch was duplicating/overriding
+        # that responsibility in the wrong layer. Commented out accordingly. If a past-limit start state
+        # ever produces NaN again, the proper fix is the NaN-reset net (below) or an upstream solver
+        # change, not an env/qpos clamp.
+        # if os.environ.get("BFM_ZERO_HARD_LIMIT_CLAMP", "1") != "0" and getattr(self, "hard_dof_pos_limits", None) is not None:
+        #     _qp = wp.to_torch(self.d.qpos)               # [N, nq]
+        #     _qv = wp.to_torch(self.d.qvel)               # [N, nv]
+        #     _jp = _qp[:, 7:7 + self.num_dof]             # [N, 29] joint pos (LIVE view of d.qpos)
+        #     _lo = self.hard_dof_pos_limits[:, 0]
+        #     _hi = self.hard_dof_pos_limits[:, 1]
+        #     _past_hi = _jp > _hi                          # outbound mask BEFORE clamping
+        #     _past_lo = _jp < _lo
+        #     _jp.clamp_(min=_lo, max=_hi)                  # project joint pos into hard range (identity if in-bounds)
+        #     _jv = _qv[:, 6:6 + self.num_dof]             # [N, 29] joint vel (LIVE view of d.qvel)
+        #     _jv.masked_fill_(_past_hi & (_jv > 0), 0.0)  # kill velocity pushing further past the HI limit
+        #     _jv.masked_fill_(_past_lo & (_jv < 0), 0.0)  # kill velocity pushing further past the LO limit
 
         # [BFM-DIAG-NAN] observe-only probe: snapshot pre-step |qvel| (async, no host sync) so
         # that IF this substep produces a non-finite state we can report the extreme state that
