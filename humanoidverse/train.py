@@ -649,6 +649,17 @@ class Workspace:
             truncated = new_truncated
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
+
+        # [BFM-OPS-FIX] Final save on loop exit. The scheduled save() inside the loop only fires
+        # when (t - last_checkpoint) >= checkpoint_every_steps; a run that exits within a checkpoint
+        # interval (e.g. resuming at 382.99M with target 384M and checkpoint_every=2M, or any
+        # clean exit before the next 2M boundary) would otherwise lose ALL progress since the last
+        # checkpoint and leave train_status.json frozen -> the supervisor sees +0 and loops forever
+        # on a run that is actually completing. Save the final step unconditionally so progress is
+        # always recorded. `t` is the last loop value (final env step reached).
+        if t > self._checkpoint_time:
+            self.save(t, replay_buffer)
+            self._checkpoint_time = t
         train_env.close()
 
     def eval(self, t, replay_buffer):
@@ -722,6 +733,53 @@ def train_bfm_zero(profile: str = "h20"):
     from humanoidverse.agents.nn_filters import DictInputFilterConfig
 
     # ------------------------------------------------------------------ #
+    #  Run intent: fresh | resume | snapshot. One concept, resolved ONCE, that
+    #  governs work_dir, whether eval/prioritization runs, and the default step
+    #  target -- replacing the prior ad-hoc BFM_ZERO_SNAPSHOT / BFM_ZERO_RESUME
+    #  boolean toggles that each mutated work_dir inline.
+    #
+    #  Selection (first match wins):
+    #    1. BFM_ZERO_RUN_MODE (explicit; preferred)
+    #    2. BFM_ZERO_SNAPSHOT=1  -> snapshot        (back-compat)
+    #       BFM_ZERO_RESUME=1    -> resume          (back-compat)
+    #    3. "fresh" (default)
+    #
+    #  diag_mode (snapshot | resume) skips evaluation AND prioritization (they
+    #  need a trained policy + a buffer of real rollouts). fresh runs both.
+    # ------------------------------------------------------------------ #
+    _RUN_MODE_DEFAULT_TARGET = {
+        "fresh":    384_000_000,   # paper scale (~7d on H20); extend only after eval
+        "resume":   750_000_000,   # extended target past paper scale
+        "snapshot": 384_000_000,   # exits during seeding; value is irrelevant
+    }
+
+    def _resolve_run_mode(profile_work_dir: str):
+        mode = os.environ.get("BFM_ZERO_RUN_MODE", "").strip().lower()
+        if mode not in _RUN_MODE_DEFAULT_TARGET:
+            if os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1":
+                mode = "snapshot"
+            elif os.environ.get("BFM_ZERO_RESUME", "0") == "1":
+                mode = "resume"
+            else:
+                mode = "fresh"
+        diag_mode = mode in ("snapshot", "resume")
+        # BFM_ZERO_WORK_DIR is an explicit override honored in ALL modes; otherwise each
+        # non-fresh mode gets a dedicated suffix so its checkpoint never collides with another's.
+        suffix = {"snapshot": "-snapshot", "resume": "-resume", "fresh": "-fresh"}[mode]
+        work_dir = os.environ.get(
+            "BFM_ZERO_WORK_DIR", profile_work_dir + suffix,
+        )
+        num_env_steps = int(os.environ.get(
+            "BFM_ZERO_NUM_ENV_STEPS", _RUN_MODE_DEFAULT_TARGET[mode],
+        ))
+        return mode, diag_mode, work_dir, num_env_steps
+
+    # NOTE: _resolve_run_mode() is defined here but CALLED below, after the platform profile `p`
+    # is selected (it needs p["work_dir"]). Run intent and platform profile are orthogonal axes:
+    # platform = which hardware (network width, env count, buffer, device); run-mode = what this
+    # run does (fresh/resume/snapshot -> work_dir, eval, target steps). They compose, so stay separate.
+
+    # ------------------------------------------------------------------ #
     #  Per-network architecture + env/buffer scale for each profile.
     #  Learning rates, reward weights, and all algorithm hyperparams are
     #  identical (paper values) across profiles.
@@ -762,31 +820,18 @@ def train_bfm_zero(profile: str = "h20"):
     if profile not in PROFILES:
         raise ValueError(f"Unknown profile '{profile}'. Choose from {list(PROFILES)}")
     p = PROFILES[profile]
-    # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
-    # When BFM_ZERO_SNAPSHOT=1: skip eval/prioritization, run the random-action seed
-    # phase (num_seed_steps = 10*N_env), capture the random-rollout buffer + agent at
-    # the end of seeding, then exit -- so the first agent.update() can be debugged
-    # offline without re-running the simulator. Unset = normal training (unchanged).
-    _snapshot_mode = os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1"
-    if _snapshot_mode:
+    # Resolve run intent now that the platform profile `p` (and its work_dir) is known.
+    _run_mode, _diag_mode, _work_dir, _num_env_steps = _resolve_run_mode(p["work_dir"])
+    print(f"[BFM-OPS] run_mode={_run_mode} work_dir={_work_dir} num_env_steps={_num_env_steps} "
+          f"diag(eval/prio off)={_diag_mode}")
+    if _run_mode == "snapshot":
         print("[BFM-DIAG-SNAPSHOT] SNAPSHOT MODE: will capture the random-rollout buffer and exit before the first update.")
-    # [BFM-DIAG-SNAPSHOT] RESUME MODE: continue training from a captured snapshot's buffer+agent
-    # (assembled into work_dir/checkpoint/ -- see the snapshot->checkpoint assembly below),
-    # WITHOUT re-running the slow seed phase and WITHOUT eval/prioritization. BFM_ZERO_SNAPSHOT
-    # is unset so the capture block never fires; training simply resumes and proceeds.
-    _resume_mode = os.environ.get("BFM_ZERO_RESUME", "0") == "1"
-    _diag_mode = _snapshot_mode or _resume_mode
-    if _resume_mode:
+    elif _run_mode == "resume":
         print("[BFM-DIAG-SNAPSHOT] RESUME MODE: will load the snapshot checkpoint (buffer+agent) and continue training.")
-    # [BFM-DIAG-SNAPSHOT] use a dedicated work_dir so snapshot/resume runs are isolated from the
-    # main training dir. Override with BFM_ZERO_SNAPSHOT_DIR / BFM_ZERO_WORK_DIR respectively.
-    _work_dir = p["work_dir"]
-    if _snapshot_mode:
-        _work_dir = os.environ.get("BFM_ZERO_SNAPSHOT_DIR", _work_dir + "-snapshot")
-    elif _resume_mode:
-        _work_dir = os.environ.get("BFM_ZERO_WORK_DIR", _work_dir + "-resume")
+    _snapshot_mode = (_run_mode == "snapshot")
+    _resume_mode = (_run_mode == "resume")
 
-    # [BFM-DIAG-SNAPSHOT] evaluations disabled in snapshot/resume mode (also disables prioritization)
+    # evaluations disabled in snapshot/resume mode (also disables prioritization)
     _evaluations = [] if _diag_mode else [
         HumanoidVerseIsaacTrackingEvaluationConfig(
             name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos',
@@ -842,7 +887,15 @@ def train_bfm_zero(profile: str = "h20"):
                 fb_pessimism_penalty=0.0,
                 actor_pessimism_penalty=0.5,
                 stddev_clip=0.3,
-                q_loss_coef=0.0,
+                q_loss_coef=0.1,   # [BFM-FIX 2026-07-07] PAPER VALUE. Was 0.0 (module default) which
+                                   # DISABLED the q_loss term — the paper's 2nd FB-loss component (eq
+                                   # app_method.tex:207) carrying the gamma current/target-step mix AND
+                                   # the Sigma_B Dirichlet/covariance normalization (B_inv_conv = solve(cov,B))
+                                   # that ties F's scale to B's covariance and keeps the backward-map
+                                   # gradient SMOOTH. Without it, only orth_loss_diag acts on |B| (pushing
+                                   # it UP unboundedly) -> Q_fb and fb_bwd_grad_norm explode -> NaN.
+                                   # Confirmed live: q_loss=0.0 fresh run hit fb_bwd peak 801k, Q_fb 940,
+                                   # NaN-reset 2.03% before being killed at step 5.08M.
                 batch_size=p["batch_size"],
                 discount=0.98,
                 use_mix_rollout=True,
@@ -900,7 +953,9 @@ def train_bfm_zero(profile: str = "h20"):
         seed=4728,
         online_parallel_envs=p["online_parallel_envs"],
         log_every_updates=8192,
-        num_env_steps=384000000,
+        # target steps resolved by _resolve_run_mode(): fresh=384M (paper scale), resume=750M,
+        # overridable via BFM_ZERO_NUM_ENV_STEPS.
+        num_env_steps=_num_env_steps,
         update_agent_every=1024,
         num_seed_steps=p["online_parallel_envs"] * 10,  # [BFM-DIAG-SNAPSHOT] 10 random-action seed iterations, scaled with N_env
         num_agent_updates=16,

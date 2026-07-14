@@ -3,6 +3,7 @@ import os
 os.environ["MUJOCO_GL"] = "egl"  # Use EGL for rendering
 os.environ["OMP_NUM_THREADS"] = "1"
 
+from datetime import datetime
 from pathlib import Path
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 import json
@@ -116,8 +117,8 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
 
         z = tracking_inference(tree_map(lambda x: x[1:], obs))
         output_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(z.cpu().numpy(), output_dir / f"zs_{MOTION_ID}.pkl")
-        print(f"Saved zs_{MOTION_ID}.pkl")
+        joblib.dump(z.cpu().numpy(), output_dir / f"zs_{MOTION_ID}__{simulator}.pkl")
+        print(f"Saved zs_{MOTION_ID}__{simulator}.pkl")
 
         observation, info = wrapped_env.reset(to_numpy=False)
 
@@ -193,6 +194,7 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         stats = {
             "clip": clip_name,
             "motion_id": MOTION_ID,
+            "simulator": simulator,
             "ep_len": ep_len,
             "init_ref_root_h": init_ref_root_h,
             "min_root_h": min_root_h,
@@ -206,7 +208,9 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
             new_frames = []
             for a, b in zip(expert_video, frames):
                 new_frames.append(np.concatenate([a, b], axis=1))
-            video_path = output_dir / f"tracking_{clip_name}.mp4"
+            # Tag with simulator + MMDDHH timestamp so runs across backends AND time don't clobber.
+            _ts = datetime.now().strftime("%m%d%H")
+            video_path = output_dir / f"tracking_{clip_name}__{simulator}__{_ts}.mp4"
             media.write_video(str(video_path), new_frames, fps=50)
             print(f"Saved video for tracking: {video_path}")
 

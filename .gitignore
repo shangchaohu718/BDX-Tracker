@@ -8,5 +8,9 @@ __pycache__/
 
 # Fetched checkpoints, model weights, and rendered videos — large binaries, never commit
 remote_checkpoint_latest/
+remote_checkpoint_*/
+remote_checkpoint_*.zip
 *.safetensors
+*.onnx
+*.onnx.data
 *.mp4

@@ -285,4 +285,6 @@ def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, exam
         input_names=["actor_obs"],  # Specify the input names
         output_names=["action"],  # Name the output
         opset_version=13,  # Specify the opset version, if needed
+        # allow any batch size at inference (the example traces with batch=1)
+        dynamic_axes={"actor_obs": {0: "batch"}, "action": {0: "batch"}},
     )
