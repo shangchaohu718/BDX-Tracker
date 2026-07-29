@@ -14,3 +14,7 @@ remote_checkpoint_*.zip
 *.onnx
 *.onnx.data
 *.mp4
+
+# Local-only artifacts: fetched wandb offline runs + remote-path scratch launchers
+_wandb/
+_launch_resume.sh

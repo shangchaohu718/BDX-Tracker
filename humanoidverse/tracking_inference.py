@@ -59,6 +59,10 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
     # Outputs under model_folder/tracking_inference (sibling of exported/)
     output_dir = model_folder / "exported"
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Disable AMP autocast before export so the traced graph is fp32 (Mish on bf16 is rejected
+    # by stock ONNXRuntime). cfg is frozen Pydantic -> model_copy. Without this, every inference
+    # run silently overwrites a valid fp32 ONNX with a broken bf16 one. See export_onnx.py.
+    model.cfg = model.cfg.model_copy(update={"amp": False})
     try:
         export_meta_policy_as_onnx(
             model,
