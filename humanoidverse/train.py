@@ -816,10 +816,41 @@ def train_bfm_zero(profile: str = "h20"):
             "buffer_size": 1_024_000,
             "buffer_device": "cpu",   # 16 GB: keep replay buffer on host
         },
+        "bdx": {
+            # BDX (14 DOF / 17 bodies, ~3.5 min motion) — rtx5080-sized nets +
+            # h20 parallelism. z_dim 128 (not 256); b halved to match. Keep 8192
+            # envs (small robot collapses harder; NaN-reset tuning depends on it).
+            # See the BDX bring-up plan for the data-ratio rationale.
+            "f_dim": 512, "f_layers": 3,
+            "b_dim": 128, "b_layers": 1,
+            "actor_dim": 512, "actor_layers": 3,
+            "critic_dim": 512, "critic_layers": 3,
+            "disc_dim": 512, "disc_layers": 2,
+            "aux_dim": 512, "aux_layers": 3,
+            "z_dim": 128,             # default 256 when key absent; BDX shrinks to 128
+            "discount": 0.95,         # default 0.98; shorter-horizon for 3.2s-median clips
+            "work_dir": "results/bfmzero-bdx",
+            "batch_size": 4096,
+            "online_parallel_envs": 8192,
+            "eval_num_envs": 1024,
+            "buffer_size": 2_560_000,
+            "buffer_device": "cuda",
+        },
     }
     if profile not in PROFILES:
         raise ValueError(f"Unknown profile '{profile}'. Choose from {list(PROFILES)}")
     p = PROFILES[profile]
+    # Robot selection. Default G1 (untouched). BFM_ZERO_ROBOT=bdx selects the
+    # BDX robot config + BDX-native motion pkl + drops the G1-only ankle-roll
+    # aux reward (BDX's single-DOF ankle has no roll component).
+    _robot_choice = os.environ.get("BFM_ZERO_ROBOT", "g1").lower()
+    _is_bdx = (_robot_choice == "bdx")
+    if _is_bdx:
+        _robot_hydra = "robot=bdx/bdx_14dof"
+        _motion_pkl = "humanoidverse/data/bdx_14dof_clipped.pkl"
+    else:
+        _robot_hydra = "robot=g1/g1_29dof_hard_waist"
+        _motion_pkl = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
     # Resolve run intent now that the platform profile `p` (and its work_dir) is known.
     _run_mode, _diag_mode, _work_dir, _num_env_steps = _resolve_run_mode(p["work_dir"])
     print(f"[BFM-OPS] run_mode={_run_mode} work_dir={_work_dir} num_env_steps={_num_env_steps} "
@@ -849,7 +880,7 @@ def train_bfm_zero(profile: str = "h20"):
                 device='cuda',
                 archi=FBcprAuxModelArchiConfig(
                     name='FBcprAuxModelArchiConfig',
-                    z_dim=256,
+                    z_dim=p.get("z_dim", 256),
                     norm_z=True,
                     f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=p["f_dim"], model='residual', hidden_layers=p["f_layers"], embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
                     b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=p["b_dim"], hidden_layers=p["b_layers"], norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
@@ -897,7 +928,7 @@ def train_bfm_zero(profile: str = "h20"):
                                    # Confirmed live: q_loss=0.0 fresh run hit fb_bwd peak 801k, Q_fb 940,
                                    # NaN-reset 2.03% before being killed at step 5.08M.
                 batch_size=p["batch_size"],
-                discount=0.98,
+                discount=p.get("discount", 0.98),
                 use_mix_rollout=True,
                 update_z_every_step=100,
                 z_buffer_size=8192,
@@ -918,8 +949,10 @@ def train_bfm_zero(profile: str = "h20"):
                 reg_coeff_aux=0.02,
                 aux_critic_pessimism_penalty=0.5
             ),
-            aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_ankle_roll', 'penalty_slippage'],
-            aux_rewards_scaling={'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0},
+            aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_slippage'] + ([] if _is_bdx else ['penalty_ankle_roll']),
+            aux_rewards_scaling={k: v for k, v in {
+                'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0,
+            }.items() if k in (['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_slippage'] + ([] if _is_bdx else ['penalty_ankle_roll']))},
             cudagraphs=False,
             compile=False
         ),
@@ -929,7 +962,7 @@ def train_bfm_zero(profile: str = "h20"):
             name='humanoidverse_isaac',
             device='cuda:0',
             # TODO this needs to be updated to point to a path with lafan dataset chunked into 10s clips
-            lafan_tail_path='humanoidverse/data/lafan_29dof_10s-clipped.pkl',
+            lafan_tail_path=_motion_pkl,
             enable_cameras=False,
             camera_render_save_dir='isaac_videos',
             max_episode_length_s=None,
@@ -940,7 +973,10 @@ def train_bfm_zero(profile: str = "h20"):
             # [BFM-DIAG-NAN] lie_down_init_prob is env-var overridable for the bad-init-state A/B
             # confirmation run: default 0.3 (baseline); set BFM_ZERO_LIE_DOWN_PROB=0.0 on the remote
             # to spawn all envs upright (no lying-down penetration) and see if the sim NaN vanishes.
-            hydra_overrides=['simulator=mujoco_warp', 'robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', f'env.config.lie_down_init_prob={os.environ.get("BFM_ZERO_LIE_DOWN_PROB", "0.3")}'],
+            # lie_down_init is G1-scale (spawns at z=0.5; BDX stands at 0.35). Disable
+            # for BDX so it doesn't float — the 0.5m spawn height is hardcoded in
+            # legged_robot_motions.py:477 and not yet robot-parameterized.
+            hydra_overrides=['simulator=mujoco_warp', _robot_hydra, 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0'] + ([] if _is_bdx else ['env.config.lie_down_init=True', f'env.config.lie_down_init_prob={os.environ.get("BFM_ZERO_LIE_DOWN_PROB", "0.3")}']),
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,

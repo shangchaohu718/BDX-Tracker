@@ -553,6 +553,17 @@ QPOS_START = 23 + 3
 QPOS_END = 23 + 3 + 23
 QVEL_IDX = 23
 
+# The state-obs pose slice for tracking metrics is G1-PHC-specific (the legacy
+# 23-DOF reduced subset). Non-G1 robots set BFM_ZERO_METRICS_DOF to their
+# dof_obs_size; the slice then covers dof_pos+dof_vel = 2*dof. Defaults to G1's 23.
+import os as _os
+_BFM_ZERO_METRICS_DOF = _os.environ.get("BFM_ZERO_METRICS_DOF")
+if _BFM_ZERO_METRICS_DOF is not None:
+    _dof = int(_BFM_ZERO_METRICS_DOF)
+    QVEL_IDX = _dof * 2          # BDX: 14 -> 28 (dof_pos + dof_vel)
+    QPOS_START = _dof + 3
+    QPOS_END = _dof + 3 + _dof
+
 
 def distance_matrix(X: torch.Tensor, Y: torch.Tensor):
     X_norm = X.pow(2).sum(1).reshape(-1, 1)

@@ -212,7 +212,8 @@ class IsaacRendererWithMuJoco:
         joint_pos = hv_env.simulator.dof_pos.clone().detach().cpu().numpy()
         if joint_pos.shape[1] != 29:
             raise ValueError(
-                f"Isaac dof_pos must be 29-D (codebase is 29 DOF only), got {joint_pos.shape[1]}."
+                f"IsaacRendererWithMuJoco is G1-only (29 DOF), got {joint_pos.shape[1]} DOF. "
+                "BDX video rendering must use --simulator mujoco (the mujoco backend), not this renderer."
             )
         mujoco_qpos = np.concatenate([base_pos, joint_pos], axis=1)  # (n_envs, 36)
 
@@ -239,7 +240,7 @@ class IsaacRendererWithMuJoco:
             if q.size != 36:
                 raise ValueError(
                     f"from_qpos expects 36-D qpos (7 free + 29 joints), got shape {q.shape}. "
-                    "23-DOF / 30-D qpos is not supported."
+                    "This renderer is G1-only; BDX (21-D qpos) must use the mujoco backend."
                 )
             self.mujoco_env.reset(options={"qpos": q})
             frames.append(self.mujoco_env.render())

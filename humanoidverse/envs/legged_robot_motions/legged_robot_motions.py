@@ -382,20 +382,23 @@ class LeggedRobotMotions(LeggedRobotBase):
         self.extras["ref_body_rot_extend"] = self.ref_body_rot_extend.clone()
 
     def _log_motion_tracking_info(self):
-        upper_body_diff = self.dif_global_body_pos[:, self.upper_body_id, :]
-        lower_body_diff = self.dif_global_body_pos[:, self.lower_body_id, :]
+        # upper/lower_body_id are only populated when the robot config defines
+        # upper_body_link/lower_body_link (G1 does; BDX has no such split). Guard
+        # so a robot that omits them doesn't AttributeError here every step.
         vr_3point_diff = self.dif_global_body_pos[:, self.motion_tracking_id, :]
         joint_pos_diff = self.dif_joint_angles
 
-        upper_body_diff_norm = upper_body_diff.norm(dim=-1).mean()
-        lower_body_diff_norm = lower_body_diff.norm(dim=-1).mean()
         vr_3point_diff_norm = vr_3point_diff.norm(dim=-1).mean()
         joint_pos_diff_norm = joint_pos_diff.norm(dim=-1).mean()
 
-        self.log_dict["upper_body_diff_norm"] = upper_body_diff_norm
-        self.log_dict["lower_body_diff_norm"] = lower_body_diff_norm
         self.log_dict["vr_3point_diff_norm"] = vr_3point_diff_norm
         self.log_dict["joint_pos_diff_norm"] = joint_pos_diff_norm
+        upper_body_id = getattr(self, "upper_body_id", None)
+        lower_body_id = getattr(self, "lower_body_id", None)
+        if upper_body_id is not None:
+            self.log_dict["upper_body_diff_norm"] = self.dif_global_body_pos[:, upper_body_id, :].norm(dim=-1).mean()
+        if lower_body_id is not None:
+            self.log_dict["lower_body_diff_norm"] = self.dif_global_body_pos[:, lower_body_id, :].norm(dim=-1).mean()
     
     def _draw_debug_vis(self):
         if self.config.simulator.config.name in ('mujoco', 'mujoco_warp'):
@@ -580,7 +583,12 @@ class LeggedRobotMotions(LeggedRobotBase):
         return res
     
     def _reward_penalty_ankle_roll(self):
-        # Compute the penalty for ankle roll
+        # Penalty for the ankle-roll DOF on G1 (ankle = [pitch, roll]). BDX has a
+        # single ankle DOF per leg, so [1:2] is an empty slice → silent no-op.
+        # Guard so a robot with <2 ankle DOFs gets a clean zero instead of a
+        # degenerate reward; the BDX reward config should simply omit this name.
+        if len(self.left_ankle_dof_indices) < 2 and len(self.right_ankle_dof_indices) < 2:
+            return torch.zeros(self.num_envs, device=self.device)
         left_ankle_roll = self.simulator.dof_pos[:, self.left_ankle_dof_indices[1:2]]
         right_ankle_roll = self.simulator.dof_pos[:, self.right_ankle_dof_indices[1:2]]
         return torch.sum(torch.square(left_ankle_roll) + torch.square(right_ankle_roll), dim=1)
@@ -588,8 +596,12 @@ class LeggedRobotMotions(LeggedRobotBase):
     def foot_contact_detect(self, positions, velocity):
         foot_vel = velocity[:, self.feet_indices]
         foot_height = positions[:, self.feet_indices, 2]
-        vel_thres = 0.4
-        height_thres = 0.07
+        # G1-tuned defaults (ankle ~0.1m standing). Smaller robots (BDX ankle
+        # ~0.04m) need lower thresholds or contact obs misfires; expose both in
+        # the robot config under motion.foot_contact_{height,vel}_thres.
+        mocap = getattr(self.config.robot, "motion", None)
+        vel_thres = getattr(mocap, "foot_contact_vel_thres", 0.4) if mocap else 0.4
+        height_thres = getattr(mocap, "foot_contact_height_thres", 0.07) if mocap else 0.07
         foot_speed = torch.norm(foot_vel, dim=-1)  # [num_envs, num_feet]
         contact_mask = (foot_speed < vel_thres) & (foot_height < height_thres)  # [num_envs, num_feet]
         return contact_mask

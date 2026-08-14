@@ -36,9 +36,12 @@ def main():
     actor_obs_dim = model._actor.input_filter.output_space.shape[0] + z_dim
     history = "history_actor" in model.cfg.archi.actor.input_filter.key
     out_name = args.name or f"{model.__class__.__name__}.onnx"
+    # action_dim is robot-specific (G1=29, BDX=14). Derive dof from the model so
+    # the state/action slice layout is correct for any robot.
+    dof = model.action_dim
 
     print(f"model: {model.__class__.__name__}")
-    print(f"actor_obs_dim (incl z): {actor_obs_dim}  z_dim: {z_dim}  history: {history}")
+    print(f"actor_obs_dim (incl z): {actor_obs_dim}  z_dim: {z_dim}  history: {history}  dof: {dof}")
 
     export_meta_policy_as_onnx(
         model,
@@ -47,7 +50,7 @@ def main():
         example_obs_dict={"actor_obs": torch.randn(1, actor_obs_dim)},
         z_dim=z_dim,
         history=history,
-        use_29dof=True,
+        dof=dof,
     )
     out = args.model_folder / "exported" / out_name
     print(f"ONNX written: {out}  ({out.stat().st_size:,} bytes)")

@@ -1,0 +1,247 @@
+# @package _global_
+
+defaults:
+  - robot_base
+
+robot:
+  # Observation parameters
+  num_bodies: 17
+  dof_obs_size: 14
+  actions_dim: 14
+  policy_obs_dim: -1
+  critic_obs_dim: -1
+
+  key_bodies: ["left_ankle_link", "right_ankle_link"]
+  contact_bodies: ["left_ankle_link", "right_ankle_link"]
+  num_feet: 2
+  right_foot_name: "right_ankle_link"
+  left_foot_name: "left_ankle_link"
+  foot_name: "ankle_link"      # substring → matches left/right_ankle_link
+  knee_name: "knee_link"       # substring → matches left/right_knee_link
+  has_torso: False
+  has_upper_body_dof: False
+
+  dof_names: ['left_hip_yaw_joint', 'left_hip_roll_joint', 'left_hip_pitch_joint', 'left_knee_joint', 'left_ankle_joint',
+              'right_hip_yaw_joint', 'right_hip_roll_joint', 'right_hip_pitch_joint', 'right_knee_joint', 'right_ankle_joint',
+              'neck_forward_joint', 'neck_pitch_joint', 'neck_yaw_joint', 'neck_roll_joint']
+  # BDX has a single ankle joint per leg (no roll). Unconditionally read at base_task.py:212-213.
+  left_ankle_dof_names: ['left_ankle_joint']
+  right_ankle_dof_names: ['right_ankle_joint']
+  knee_dof_names: ['left_knee_joint', 'right_knee_joint']
+
+  dof_pos_lower_limit_list: [-0.349066, -0.698132, -0.52359, -2.321287, -1.39626,
+                             -0.349066, -0.261799, -0.52359, -2.321287, -1.39626,
+                             0.0, -1.5708, -1.0472, -0.436332]
+  dof_pos_upper_limit_list: [0.349066, 0.261799, 2.356194, 0.0, 1.39626,
+                             0.349066, 0.698132, 2.356194, 0.0, 1.39626,
+                             1.69297, 0.0, 1.0472, 0.436332]
+  dof_vel_limit_list: [32., 32., 32., 32., 32.,
+                       32., 32., 32., 32., 32.,
+                       32., 32., 32., 32.]   # not in bdx robot_config.yaml; start uniform like G1 legs, tune
+  dof_effort_limit_list: [23.7, 34.0, 34.0, 34.0, 23.7,
+                          23.7, 34.0, 34.0, 34.0, 23.7,
+                          23.7, 4.8, 4.8, 4.8]
+  dof_effort_limit_scale: 0.8
+  # only apply for isaacsim (mujoco_warp reads inertial from MJCF; harmless here)
+  dof_armature_list: [0.01, 0.01, 0.01, 0.01, 0.01,
+                      0.01, 0.01, 0.01, 0.01, 0.01,
+                      0.01, 0.01, 0.01, 0.01]   # not documented for BDX; uniform start, tune
+  dof_joint_friction_list: [0.03, 0.03, 0.03, 0.03, 0.03,
+                            0.03, 0.03, 0.03, 0.03, 0.03,
+                            0.03, 0.03, 0.03, 0.03]
+
+  body_names: ['base_link',
+               'left_hip_yaw_link', 'left_hip_roll_link', 'left_hip_pitch_link', 'left_knee_link', 'left_ankle_link',
+               'right_hip_yaw_link', 'right_hip_roll_link', 'right_hip_pitch_link', 'right_knee_link', 'right_ankle_link',
+               'neck_forward_link', 'neck_pitch_link', 'neck_yaw_link', 'neck_roll_link',
+               'left_ear_link', 'right_ear_link']
+
+  terminate_after_contacts_on: ["base_link"]   # BDX has no pelvis/torso; base is the trunk
+  penalize_contacts_on: ["base_link"]
+
+  init_state:
+    pos: [0.0, 0.0, 0.35] # x,y,z [m] — BDX base height (G1 is 0.8)
+    rot: [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles: # BDX home keyframe
+      left_hip_yaw_joint: 0.0
+      left_hip_roll_joint: 0.0
+      left_hip_pitch_joint: 0.904
+      left_knee_joint: -1.143
+      left_ankle_joint: 0.24
+      right_hip_yaw_joint: 0.0
+      right_hip_roll_joint: 0.0
+      right_hip_pitch_joint: 0.904
+      right_knee_joint: -1.143
+      right_ankle_joint: 0.24
+      neck_forward_joint: 0.5
+      neck_pitch_joint: -0.5
+      neck_yaw_joint: 0.0
+      neck_roll_joint: 0.0
+
+  randomize_link_body_names: [
+    'base_link', 'left_hip_yaw_link', 'left_hip_roll_link', 'left_hip_pitch_link', 'left_knee_link',
+    'right_hip_yaw_link', 'right_hip_roll_link', 'right_hip_pitch_link', 'right_knee_link',
+  ]
+
+  control:
+    control_type: P
+    # Name-keyed by joint-name FRAGMENT; legged_robot_base.py:75-92 expands via substring match.
+    # Every joint MUST match ≥1 key or ValueError. Do NOT use bare "hip:" (substring of all three hip_*).
+    stiffness: # [N*m/rad]
+      hip_yaw: 10.0
+      hip_roll: 15.0
+      hip_pitch: 15.0
+      knee: 15.0
+      ankle: 10.0      # substring → matches left/right_ankle_joint (singular; NOT ankle_pitch/ankle_roll)
+      neck_forward: 10.0
+      neck_pitch: 5.0
+      neck_yaw: 5.0
+      neck_roll: 5.0
+    damping: # [N*m*s/rad]
+      hip_yaw: 0.3
+      hip_roll: 0.6
+      hip_pitch: 0.6
+      knee: 0.6
+      ankle: 0.3
+      neck_forward: 0.3
+      neck_pitch: 0.2
+      neck_yaw: 0.2
+      neck_roll: 0.2
+    # action scale: target angle = actionScale * action + defaultAngle
+    action_scale: 0.25
+    action_clip_value: 5.0
+    action_rescale: True
+    clip_torques: True
+    normalize_action: True
+    normalize_action_from: 1.0
+    normalize_action_to: 5.0
+
+  asset:
+    collapse_fixed_joints: True
+    replace_cylinder_with_capsule: True
+    flip_visual_attachments: False
+    armature: 0.001
+    thickness: 0.01
+    max_angular_velocity: 1000.
+    max_linear_velocity: 1000.
+    density: 0.001
+    angular_damping: 0.
+    linear_damping: 0.
+
+    urdf_file: "bdx/bdx_v4.urdf"
+    xml_file: "bdx/bdx_v4.xml"
+    scene_file: "bdx/scene_bdx_freebase_mujoco.xml"   # mujoco_warp.setup reads this (config-driven)
+    robot_type: bdx_v4
+    self_collisions: 0 # 1 to disable, 0 to enable self collisions
+    default_dof_drive_mode: 3
+    fix_base_link: False
+
+  motion:
+    motion_file : 'data/bdx_14dof_clipped.pkl'   # overwritten at runtime by train.py lafan_tail_path
+    asset:
+      assetRoot: "humanoidverse/data/robots/bdx/"
+      assetFileName: "bdx_v4.xml"
+      urdfFileName: "bdx_v4.urdf"
+
+    humanoid_type: bdx_v4
+    bias_offset: False
+    has_self_collision: True
+    has_mesh: False
+    has_jt_limit: False
+    has_dof_subset: True
+    has_upright_start: True
+    has_smpl_pd_offset: False
+    remove_toe: False
+    motion_sym_loss: False
+    sym_loss_coef: 1
+    big_ankle: False      # BDX ankle is a small single-DOF joint, not G1's big foot
+
+    has_shape_obs: false
+    has_shape_obs_disc: false
+    has_shape_variation: False
+
+    uniform_sample: False
+    motion_fps_scale: 1.0
+
+    standardize_motion_length: True
+    standardize_motion_length_value: 10
+
+    reverse_motion: False
+
+    masterfoot: False
+    freeze_toe: false
+    freeze_hand: False
+    box_body: True
+    real_weight: True
+    real_weight_porpotion_capsules: True
+    real_weight_porpotion_boxes: True
+
+    # foot_contact_detect thresholds. G1 defaults (0.07/0.4) are tuned to its
+    # ~0.1m ankle height; BDX ankle is ~0.04m standing, so lower both. Drives the
+    # contact_binary obs consumed by policy + discriminator (legged_robot_motions.py:598).
+    foot_contact_height_thres: 0.04
+    foot_contact_vel_thres: 0.3
+
+    body_names: ['base_link',
+                 'left_hip_yaw_link', 'left_hip_roll_link', 'left_hip_pitch_link', 'left_knee_link', 'left_ankle_link',
+                 'right_hip_yaw_link', 'right_hip_roll_link', 'right_hip_pitch_link', 'right_knee_link', 'right_ankle_link',
+                 'neck_forward_link', 'neck_pitch_link', 'neck_yaw_link', 'neck_roll_link',
+                 'left_ear_link', 'right_ear_link']
+
+    dof_names: ['left_hip_yaw_joint', 'left_hip_roll_joint', 'left_hip_pitch_joint', 'left_knee_joint', 'left_ankle_joint',
+                'right_hip_yaw_joint', 'right_hip_roll_joint', 'right_hip_pitch_joint', 'right_knee_joint', 'right_ankle_joint',
+                'neck_forward_joint', 'neck_pitch_joint', 'neck_yaw_joint', 'neck_roll_joint']
+    right_foot_name: 'right_ankle_link'
+    left_foot_name: 'left_ankle_link'
+
+    nums_extend_bodies: 0     # BDX has real neck bodies; no virtual head_link. else-branch at legged_robot_motions.py:91-92 handles 0.
+    extend_config: []
+
+    # REQUIRED: motion_tracking_id is unconditionally read into an observation at
+    # legged_robot_motions.py:340. Must point at a real BDX body. Neck is the BDX
+    # analog of G1's head_link tracking marker. (Omit upper/lower_body_link —
+    # only used in _log_motion_tracking_info, guarded by Step 6A.)
+    motion_tracking_link:
+      - "neck_pitch_link"
+
+    pelvis_link: "base_link"
+    base_link: "base_link"
+    hips_link:
+      - "left_hip_yaw_link"
+      - "left_hip_roll_link"
+      - "left_hip_pitch_link"
+      - "right_hip_yaw_link"
+      - "right_hip_roll_link"
+      - "right_hip_pitch_link"
+
+    joint_matches:
+      - ["base_link", "Pelvis"]
+      - ["left_hip_pitch_link", "L_Hip"]
+      - ["left_knee_link", "L_Knee"]
+      - ["left_ankle_link", "L_Ankle"]
+      - ["right_hip_pitch_link", "R_Hip"]
+      - ["right_knee_link", "R_Knee"]
+      - ["right_ankle_link", "R_Ankle"]
+
+    visualization:
+      customize_color : True
+      marker_joint_colors :
+      - [0.929, 0.867, 0.437] # base_link
+      - [0.929, 0.867, 0.437] # left_hip_yaw
+      - [0.929, 0.867, 0.437] # left_hip_roll
+      - [0.929, 0.867, 0.437] # left_hip_pitch
+      - [0.929, 0.867, 0.437] # left_knee
+      - [0.929, 0.867, 0.437] # left_ankle
+      - [0.929, 0.867, 0.437] # right_hip_yaw
+      - [0.929, 0.867, 0.437] # right_hip_roll
+      - [0.929, 0.867, 0.437] # right_hip_pitch
+      - [0.929, 0.867, 0.437] # right_knee
+      - [0.929, 0.867, 0.437] # right_ankle
+      - [0.929, 0.867, 0.437] # neck_forward
+      - [0.929, 0.867, 0.437] # neck_pitch
+      - [0.929, 0.867, 0.437] # neck_yaw
+      - [0.929, 0.867, 0.437] # neck_roll
+      - [0.929, 0.867, 0.437] # left_ear
+      - [0.929, 0.867, 0.437] # right_ear

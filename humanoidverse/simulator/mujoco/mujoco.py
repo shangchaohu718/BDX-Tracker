@@ -26,13 +26,13 @@ class MuJoCo(BaseSimulator):
         self.render_height=400
     
     def setup(self):
-        # Build the path to the MuJoCo model (MJCF/XML file)
-        self.model_path = os.path.join(
-            self.robot_cfg.asset.asset_root, 
-            self.robot_cfg.asset.xml_file
-        )
+        # Scene path is config-driven: robot.asset.scene_file (relative to data/robots/).
+        # Falls back to the G1 scene so existing G1 runs are byte-identical.
         hv_root = Path(__file__).parents[2]
-        self.model_path = str(hv_root / "data/robots/g1/scene_29dof_freebase_mujoco.xml")
+        scene_file = self.robot_cfg.asset.get("scene_file", None)
+        if scene_file is None:
+            scene_file = "g1/scene_29dof_freebase_mujoco.xml"
+        self.model_path = str(hv_root / "data/robots" / scene_file)
         self.freebase = True
 
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
@@ -100,9 +100,9 @@ class MuJoCo(BaseSimulator):
 
             # TODO: dynamic friction?
 
-        if self.domain_rand_config.get("randomize_base_com", False):
+        if self.domain_rand_config.get("randomize_base_com", False) and self.robot_cfg.has_torso:
             # get id of torso
-            self.torso_id = self.model.body("torso_link").id
+            self.torso_id = self.model.body(self.robot_cfg.torso_name).id
             assert self.torso_id > -1
             x_uniform_range = self.domain_rand_config["base_com_range"]["x"]
             assert self.domain_rand_config["base_com_range"]["y"] == x_uniform_range
@@ -177,20 +177,18 @@ class MuJoCo(BaseSimulator):
 
         self.body_id = np.arange(self.num_bodies, dtype=np.int32) + 1
 
-        if "23" in self.model_path:
+        # If the loaded model has more bodies than the robot config expects, prune the
+        # extras (e.g. G1's fakehand/wrist bodies). Generalized from the old `"23"`/`"29"`
+        # path-string checks so any robot works. The asserts below still catch a true mismatch.
+        expected_bodies = list(self.robot_cfg.body_names)
+        if self.num_bodies > len(expected_bodies):
             for b in range(self.model.nbody):
-                if "wrist" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b) or "hand" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b):
-                    self.body_names.remove(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b))
+                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b)
+                if name and name not in expected_bodies and name in self.body_names:
+                    self.body_names.remove(name)
                     self.num_bodies -= 1
                     self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
 
-        if "29" in self.model_path:
-            for b in range(self.model.nbody):
-                if "hand" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b):
-                    self.body_names.remove(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b))
-                    self.num_bodies -= 1
-                    self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
-        
         # Validate configuration consistency.
         assert self.num_dof == len(self.robot_cfg.dof_names), "Number of DOFs must match the config."
         assert self.num_bodies == len(self.robot_cfg.body_names), "Number of bodies must match the config."

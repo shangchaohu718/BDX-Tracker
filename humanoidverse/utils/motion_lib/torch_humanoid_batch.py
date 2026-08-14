@@ -222,10 +222,14 @@ class Humanoid_Batch:
             
             
             if len(self.cfg.extend_config) > 0:
-                return_dict.dof_pos = pose.sum(dim = -1)[..., 1:self.num_bodies] # you can sum it up since unitree's each joint has 1 dof. Last two are for hands. doesn't really matter. 
+                return_dict.dof_pos = pose.sum(dim = -1)[..., 1:self.num_bodies] # you can sum it up since unitree's each joint has 1 dof. Last two are for hands. doesn't really matter.
             else:
                 if not len(self.actuated_joints_idx) == len(self.body_names):
-                    return_dict.dof_pos = pose.sum(dim = -1)[..., self.actuated_joints_idx]
+                    # Some bodies have no joint (e.g. BDX ear links). actuated_joints_idx
+                    # indexes jointed bodies but INCLUDES the root (body 0, via the
+                    # freejoint) — drop it so dof_pos has one entry per actuated DOF.
+                    non_root = self.actuated_joints_idx[self.actuated_joints_idx != 0]
+                    return_dict.dof_pos = pose.sum(dim = -1)[..., non_root]
                 else:
                     return_dict.dof_pos = pose.sum(dim = -1)[..., 1:]
             

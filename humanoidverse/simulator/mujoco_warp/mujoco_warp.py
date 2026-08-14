@@ -72,7 +72,12 @@ class MuJoCoWarp(BaseSimulator):
 
     def setup(self):
         hv_root = Path(__file__).parents[2]
-        self.model_path = str(hv_root / "data/robots/g1/scene_29dof_freebase_mujoco.xml")
+        # Scene path is config-driven: robot.asset.scene_file (relative to data/robots/).
+        # Falls back to the G1 scene so existing G1 runs are byte-identical.
+        scene_file = self.robot_cfg.asset.get("scene_file", None)
+        if scene_file is None:
+            scene_file = "g1/scene_29dof_freebase_mujoco.xml"
+        self.model_path = str(hv_root / "data/robots" / scene_file)
 
         # Load standard MuJoCo model
         self.mj_model = mujoco.MjModel.from_xml_path(self.model_path)
@@ -186,15 +191,17 @@ class MuJoCoWarp(BaseSimulator):
 
         self.body_id = np.arange(self.num_bodies, dtype=np.int32) + 1
 
-        # For 29-DOF model, exclude hand bodies
-        if "29" in self.model_path:
+        # If the loaded model has more bodies than the robot config expects, prune the
+        # extras (e.g. G1's fakehand bodies). Generalized from the old `"29" in model_path`
+        # check so any robot works. The asserts below still catch a true mismatch.
+        expected_bodies = list(self.robot_cfg.body_names)
+        if self.num_bodies > len(expected_bodies):
             for b in range(self.mj_model.nbody):
                 name = mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, b)
-                if name and "hand" in name:
-                    if name in self.body_names:
-                        self.body_names.remove(name)
-                        self.num_bodies -= 1
-                        self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
+                if name and name not in expected_bodies and name in self.body_names:
+                    self.body_names.remove(name)
+                    self.num_bodies -= 1
+                    self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
 
         assert self.num_dof == len(self.robot_cfg.dof_names), (
             f"DOF count mismatch: model={self.num_dof}, config={len(self.robot_cfg.dof_names)}"
@@ -320,8 +327,8 @@ class MuJoCoWarp(BaseSimulator):
             )
             self.mj_model.geom_friction[:] = friction
 
-        if self.domain_rand_config.get("randomize_base_com", False):
-            torso_id = self.mj_model.body("torso_link").id
+        if self.domain_rand_config.get("randomize_base_com", False) and self.robot_cfg.has_torso:
+            torso_id = self.mj_model.body(self.robot_cfg.torso_name).id
             assert torso_id > -1
             x_range = self.domain_rand_config["base_com_range"]["x"]
             dmass_torso = np.random.uniform(low=x_range[0], high=x_range[1])
@@ -702,8 +709,12 @@ class MuJoCoWarp(BaseSimulator):
         # Convert to warp array (zero-copy if already on CUDA)
         wp_torques = wp.from_torch(torques, dtype=wp.float32)
         if self.freebase:
-            # Skip first 6 ctrl entries (free base), write joint torques
-            wp.copy(self.d.ctrl[:, 6:], wp_torques)
+            # G1's MJCF defines 6 virtual base actuators (fx..tz) before the joint
+            # motors, so ctrl = [6 base | 29 joints] and the offset is 6. BDX has no
+            # base actuators, so ctrl = [14 joints] and the offset is 0. Derive it as
+            # nu - num_dof (works for both; equals 6 for G1, 0 for BDX).
+            ctrl_offset = self.mj_model.nu - self.num_dof
+            wp.copy(self.d.ctrl[:, ctrl_offset:], wp_torques)
         else:
             wp.copy(self.d.ctrl, wp_torques)
 
