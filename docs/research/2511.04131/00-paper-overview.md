@@ -9,6 +9,7 @@
 | 机构 | Carnegie Mellon University + Meta |
 | 作者 | Yitang Li*, Zhengyi Luo*, Tonghe Zhang$, Cunxi Dai$, Andrea Tirinzoni, Anssi Kanervisto 等 |
 | 项目主页 | https://lecar-lab.github.io/BFM-Zero/ |
+| 本地 PDF | `/home/tcl/Documents/RoboticsControl/2511.04131v1 BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning.pdf` |
 | 机器人 | Unitree G1 (29-DoF), Booster T1 |
 
 ---

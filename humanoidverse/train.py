@@ -51,6 +51,7 @@ REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
 TRACKING_EVAL_LOG_FILENAME = "tracking_eval_log.csv"
 
 CHECKPOINT_DIR_NAME = "checkpoint"
+CHECKPOINT_HISTORY_DIR_NAME = "checkpoint_history"
 
 _ENC_CONFIG_TO_EXPERT_DATA_OBS_MAPPER = {
     HumanoidVerseIsaacConfig: None,
@@ -91,6 +92,10 @@ class TrainConfig(BaseConfig):
     num_agent_updates: int = 50
     # Note: this is in env steps (multiples of online_parallel_envs)
     checkpoint_every_steps: int = 5_000_000
+    # [CKPT-HISTORY] step interval for rolling snapshots into checkpoint_history/.
+    # 100M steps ~= 12h at ~2260 FPS. (latest-only checkpoint/ is overwritten every
+    # checkpoint_every_steps and cannot survive a weights-corrupting failure; history can.)
+    checkpoint_history_every_steps: int = 20_000_000
     checkpoint_buffer: bool = True
     prioritization: bool = False
     prioritization_min_val: float = 0.5
@@ -435,7 +440,9 @@ class Workspace:
                     truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
 
-                if self.cfg.prioritization:
+                # [EVAL-SUBPROC] a failed eval tick yields None metrics — skip the
+                # priority update that round rather than crashing training.
+                if self.cfg.prioritization and eval_metrics.get(self.priorization_eval_name) is not None:
                     assert len(eval_metrics[self.priorization_eval_name]) == len(replay_buffer["expert_slicer"].motion_ids), (
                         "Mismatch in number of motions returned by the eval"
                     )
@@ -578,6 +585,105 @@ class Workspace:
                         }
             else:
                 raise NotImplementedError("still some work to do for gymnasium < 1.0")
+            # [BFM-FINITE-BUFFER] -- fix added 2026-09-02
+            # mujoco_warp's NaN-reset net heals sim state AFTER the transition was already
+            # sampled, so non-finite observation/reward rows still reach the buffer (seen
+            # as target_Q=inf -> singular linalg.solve at ~0.54M steps on both the resumed
+            # and the fresh-scratch run). Drop those rows before insertion: an env that
+            # produced NaN this step contributes nothing learnable anyway (its state was
+            # garbage). Mask = any non-finite float entry in observation / next.observation /
+            # reward. Logs every drop; a fully-bad batch is skipped entirely.
+            _bad_mask = None
+            _bad_fields = []
+            # Two buffer layouts reach this point: the trajectory branch stores leaves as
+            # [1, N, ...] with NO "next" key (next obs comes from trajectory slicing), the
+            # dict branch stores [N, ...] with data["next"]["observation"]. Normalize the
+            # trajectory layout to [N, ...] (squeeze the dummy axis; re-add before extend)
+            # and probe the live next-obs tree (new_td) in that case.
+            _traj_layout = "next" not in data
+            if _traj_layout:
+                data = tree_map(lambda x: x[0], data)
+            _next_obs_tree = data["next"]["observation"] if not _traj_layout else new_td
+
+            def _acc_bad(x):
+                nonlocal _bad_mask
+                is_torch = hasattr(x, "is_cuda") or (hasattr(x, "device") and hasattr(x, "numpy"))
+                if is_torch:
+                    if not x.dtype.is_floating_point:
+                        return
+                    bad = ~torch.isfinite(x)
+                    # normalize to a cpu numpy bool vector so numpy|torch leaves can be OR'd;
+                    # numpy bool masks index BOTH numpy arrays and torch tensors correctly
+                    bad = bad.reshape(bad.shape[0], -1).any(dim=-1).cpu().numpy()
+                else:
+                    if not (hasattr(x, "dtype") and np.issubdtype(x.dtype, np.floating)):
+                        return
+                    bad = ~np.isfinite(x)
+                    bad = bad.reshape(bad.shape[0], -1).any(axis=-1)
+                _bad_mask = bad if _bad_mask is None else (_bad_mask | bad)
+
+            tree_map(_acc_bad, data["observation"])
+            tree_map(_acc_bad, _next_obs_tree)
+            _acc_bad(data["reward"])
+            if _bad_mask is not None and _bad_mask.any():
+                _keep = ~_bad_mask
+                print(
+                    f"[BFM-FINITE-BUFFER] t={t}: dropping {int(_bad_mask.sum())}/{_bad_mask.shape[0]} "
+                    f"non-finite transition(s) before buffer insert",
+                    flush=True,
+                )
+                # [BFM-POISON-CAPTURE] pin the poison: which fields, what values, full rows.
+                # Dumps capped so a runaway source can't fill the disk.
+                try:
+                    self._poison_dumps = getattr(self, "_poison_dumps", 0)
+                    if self._poison_dumps < 5:
+                        from torch.utils._pytree import tree_map_with_path
+
+                        def _leaf_np(x):
+                            return x.cpu().numpy() if hasattr(x, "is_cuda") else np.asarray(x)
+
+                        def _probe(path, x):
+                            is_torch = hasattr(x, "is_cuda") or (hasattr(x, "device") and hasattr(x, "numpy"))
+                            if is_torch:
+                                if not x.dtype.is_floating_point:
+                                    return
+                                vals = x.cpu().numpy()
+                            else:
+                                if not (hasattr(x, "dtype") and np.issubdtype(x.dtype, np.floating)):
+                                    return
+                                vals = np.asarray(x)
+                            n_bad = int((~np.isfinite(vals)).sum())
+                            if n_bad:
+                                _samp = vals[~np.isfinite(vals)].ravel()[:3]
+                                _bad_fields.append(f"{'.'.join(map(str, path))}:{n_bad}/{vals.size}={_samp}")
+
+                        for _tree, _label in (
+                            (data["observation"], "observation"),
+                            (_next_obs_tree, "next.observation"),
+                        ):
+                            tree_map_with_path(_probe, _tree)
+                        _r = data["reward"]
+                        _rn = _r.cpu().numpy() if hasattr(_r, "is_cuda") else np.asarray(_r)
+                        _bad_fields.append(f"reward:{int((~np.isfinite(_rn)).sum())}/{_rn.size}")
+                        _dump = tree_map(_leaf_np, data)
+                        _dump["__meta__"] = {
+                            "t": int(t),
+                            "bad_mask": _bad_mask,
+                            "bad_fields": _bad_fields,
+                            "n_envs_batch": int(_bad_mask.shape[0]),
+                        }
+                        _dump_dir = self.work_dir / "poison_dumps"
+                        _dump_dir.mkdir(parents=True, exist_ok=True)
+                        np.save(_dump_dir / f"poison_t{int(t)}_n{int(_bad_mask.sum())}.npy", _dump, allow_pickle=True)
+                        self._poison_dumps += 1
+                        print(f"[BFM-POISON-CAPTURE] fields with non-finite entries: {_bad_fields}", flush=True)
+                except Exception as _e:  # never let diagnostics kill training
+                    print(f"[BFM-POISON-CAPTURE] capture failed (non-fatal): {_e}", flush=True)
+                if not _keep.any():
+                    continue  # whole batch non-finite: nothing to insert
+                data = tree_map(lambda x: x[_keep], data)
+            if _traj_layout:
+                data = tree_map(lambda x: x[None, ...], data)
             replay_buffer["train"].extend(data)
 
             # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
@@ -662,6 +768,57 @@ class Workspace:
             self._checkpoint_time = t
         train_env.close()
 
+    def _run_tracking_eval_subprocess(self, t, evaluation):
+        """Run one tracking evaluation in a subprocess (humanoidverse.eval_worker).
+
+        Returns (evaluation_metrics, wandb_dict) on success, (None, None) on failure —
+        the caller must skip logging in that case; a failed eval never kills training.
+        """
+        import subprocess
+        import sys
+
+        eval_tmp = self.work_dir / "eval_tmp"
+        eval_tmp.mkdir(exist_ok=True, parents=True)
+        env_cfg_path = eval_tmp / "env_config.json"
+        eval_cfg_path = eval_tmp / "eval_config.json"
+        results_path = eval_tmp / f"results_{t}.json"
+        with env_cfg_path.open("w") as f:
+            json.dump(self.cfg.env.model_dump(), f)
+        with eval_cfg_path.open("w") as f:
+            json.dump(evaluation.cfg.model_dump(), f)
+
+        # Snapshot the live weights so the eval measures the current model, not the
+        # last periodic checkpoint (same format the checkpoint dir uses).
+        checkpoint_dir = str(eval_tmp / "agent_snapshot")
+        self.agent.save(checkpoint_dir)
+
+        cmd = [
+            sys.executable, "-m", "humanoidverse.eval_worker",
+            "--checkpoint", checkpoint_dir,
+            "--env-config", str(env_cfg_path),
+            "--eval-config", str(eval_cfg_path),
+            "--timestep", str(int(t)),
+            "--results-json", str(results_path),
+            "--device", self.cfg.agent.model.device,
+        ]
+        print(f"[EVAL-SUBPROC] launching worker for timestep {t}")
+        try:
+            proc = subprocess.run(cmd, timeout=3600, capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            print("[EVAL-SUBPROC] worker failed: timeout after 3600s — skipping this eval tick")
+            return None, None
+        if proc.returncode != 0:
+            print(f"[EVAL-SUBPROC] worker failed rc={proc.returncode} — skipping this eval tick")
+            print("[EVAL-SUBPROC] stderr tail:\n" + "\n".join(proc.stderr.splitlines()[-30:]))
+            return None, None
+        with results_path.open("r") as f:
+            payload = json.load(f)
+        if "error" in payload:
+            print(f"[EVAL-SUBPROC] worker failed:\n{payload['error']}")
+            return None, None
+        print(f"[EVAL-SUBPROC] worker rc=0 timestep={t}")
+        return payload["evaluation_metrics"], payload["wandb_dict"]
+
     def eval(self, t, replay_buffer):
         print(f"Starting evaluation at time {t}")
         evaluation_results = {}
@@ -678,10 +835,10 @@ class Workspace:
             self.agent._model.train(False)
 
             if isinstance(self.cfg.env, HumanoidVerseIsaacConfig):
-                # Pass train env
-                evaluation_metrics, wandb_dict = evaluation.run(
-                    timestep=t, agent_or_model=self.agent, replay_buffer=replay_buffer, logger=logger, env=self.train_env
-                )
+                # [EVAL-SUBPROC] run the tracking eval in an isolated subprocess: the
+                # motion-lib staging RAM is returned to the OS when the worker exits,
+                # keeping this (training) process's RSS flat across eval ticks.
+                evaluation_metrics, wandb_dict = self._run_tracking_eval_subprocess(t, evaluation)
             else:
                 evaluation_metrics, wandb_dict = evaluation.run(
                     timestep=t,
@@ -714,6 +871,24 @@ class Workspace:
             replay_buffer["train"].save(self.work_dir / CHECKPOINT_DIR_NAME / "buffers" / "train")
         with (self.work_dir / CHECKPOINT_DIR_NAME / "train_status.json").open("w+") as f:
             json.dump({"time": time}, f, indent=4)
+        # [CKPT-HISTORY] rolling step-based snapshots (every checkpoint_history_every_steps).
+        # The marker stores the LAST SAVED STEP on disk so supervisor relaunches resume the
+        # schedule correctly. Snapshots are model-only (no optimizer/buffer): inference +
+        # rollback use; resuming training still goes through checkpoint/.
+        history_dir = self.work_dir / CHECKPOINT_HISTORY_DIR_NAME
+        history_dir.mkdir(parents=True, exist_ok=True)
+        marker = history_dir / ".last_history_save"
+        try:
+            last = int(marker.read_text().strip())
+        except (OSError, ValueError):
+            last = -1
+        if time - last >= self.cfg.checkpoint_history_every_steps:
+            snap_dir = history_dir / f"t{time}"
+            print(f"[CKPT-HISTORY] saving rolling snapshot -> {snap_dir}")
+            self.agent.save(str(snap_dir))
+            with (snap_dir / "train_status.json").open("w+") as f:
+                json.dump({"time": time}, f, indent=4)
+            marker.write_text(str(time))
 
 
 def train_bfm_zero(profile: str = "h20"):
@@ -836,6 +1011,51 @@ def train_bfm_zero(profile: str = "h20"):
             "buffer_size": 2_560_000,
             "buffer_device": "cuda",
         },
+        "bdx2": {
+            # BDX + dataset_walk_export (27.7 h policy-rollout walking corpus,
+            # 10,199 var-length whole clips / 4.98M frames; see the dataset
+            # README). 20x G1's data -> scale up from the data-scarcity-era
+            # `bdx` profile: 1024/4 big nets, batch 8192, discount 0.98 (clips
+            # up to 25 s), buffer 5.12M. Disc stays 512/2: highly correlated
+            # intervene data (42% of frames) keeps the overpowering risk.
+            # z stays 128 (policy-generated motion is smooth; diversity is
+            # command-space, not style-space).
+            "f_dim": 1024, "f_layers": 4,
+            "b_dim": 256, "b_layers": 1,
+            "actor_dim": 1024, "actor_layers": 4,
+            "critic_dim": 1024, "critic_layers": 4,
+            "disc_dim": 512, "disc_layers": 2,
+            "aux_dim": 1024, "aux_layers": 4,
+            "z_dim": 128,
+            "discount": 0.98,
+            "work_dir": "results/bfmzero-bdx-walkexport",
+            "batch_size": 8192,
+            "online_parallel_envs": 8192,
+            "eval_num_envs": 1024,
+            "buffer_size": 5_120_000,
+            "buffer_device": "cuda",
+        },
+        "bdx3": {
+            # BDX walkexport = upstream LeCAR-Lab/BFM-Zero train.py settings verbatim,
+            # except hidden_dim halved 2048->1024 for f/actor/critic/aux. Layers,
+            # embedding_layers (default 2, untouched), disc 1024/3, b 256/1, z 256 all
+            # match the original repo exactly. bdx2's disc 512/2 + z 128 are the main
+            # suspects behind the 443M backward-map rank collapse; both back to paper.
+            "f_dim": 1024, "f_layers": 6,
+            "b_dim": 256, "b_layers": 1,
+            "actor_dim": 1024, "actor_layers": 6,
+            "critic_dim": 1024, "critic_layers": 6,
+            "disc_dim": 1024, "disc_layers": 2,   # [2026-09-02] paper table: D = MLP 2层 x1024 (was 3, repo value)
+            "aux_dim": 1024, "aux_layers": 6,
+            "z_dim": 256,
+            "discount": 0.98,
+            "work_dir": "results/bfmzero-bdx-walkexport-up",
+            "batch_size": 8192,
+            "online_parallel_envs": 8192,
+            "eval_num_envs": 1024,
+            "buffer_size": 5_120_000,
+            "buffer_device": "cuda",
+        },
     }
     if profile not in PROFILES:
         raise ValueError(f"Unknown profile '{profile}'. Choose from {list(PROFILES)}")
@@ -847,7 +1067,10 @@ def train_bfm_zero(profile: str = "h20"):
     _is_bdx = (_robot_choice == "bdx")
     if _is_bdx:
         _robot_hydra = "robot=bdx/bdx_14dof"
-        _motion_pkl = "humanoidverse/data/bdx_14dof_clipped.pkl"
+        # BFM_ZERO_MOTION_PKL overrides the motion source (e.g. the
+        # dataset_walkexport corpus) without touching the default library.
+        _motion_pkl = os.environ.get(
+            "BFM_ZERO_MOTION_PKL", "humanoidverse/data/bdx_14dof_clipped.pkl")
     else:
         _robot_hydra = "robot=g1/g1_29dof_hard_waist"
         _motion_pkl = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
@@ -911,7 +1134,11 @@ def train_bfm_zero(profile: str = "h20"):
                 lr_b=1e-05,
                 lr_actor=0.0003,
                 weight_decay=0.0,
-                clip_grad_norm=0.0,   # paper default (disabled)
+                clip_grad_norm=10000.0,   # [BFM-FIX 2026-09-02] was 0.0 (paper default). The bdx3 walkexport-up
+                                          # run diverged deterministically at ~144.7M (target_Q=inf, fb_bwd_grad_norm
+                                          # 171k, F_norm 20->455). Healthy grads: actor/critic ~1e2, fb maps 1e3-1e4 —
+                                          # so clip at 1e4 only caps divergence spikes (e.g. fb_bwd >1e5), never the
+                                          # routine FB gradients (a 1.0 clip would be a 1000x hidden lr cut).
                 fb_target_tau=0.01,
                 ortho_coef=100.0,
                 train_goal_ratio=0.2,
@@ -1004,7 +1231,11 @@ def train_bfm_zero(profile: str = "h20"):
         # shared volume it filled the disk and corrupted a half-written save. Model + optimizer state (the
         # learned part) are still checkpointed and resumed; the replay buffer simply re-seeds on each resume
         # (num_seed_steps of random actions), negligible cost over a 384M-step run.
-        checkpoint_buffer=False,
+        # [BFM-OPS 2026-09-01] re-enable buffer checkpointing: volume now 466G/305G-free (the old
+        # 94G disk-fill constraint is gone). Saves the replay buffer alongside model+optimizer so
+        # supervisor resumes are seamless (no bufferless-refill distribution shock -> no post-resume
+        # fb_bwd transient spikes). The bufferless warmup gate in train_online stays as fallback.
+        checkpoint_buffer=True,
         prioritization=(not _diag_mode),  # [BFM-DIAG-SNAPSHOT] off in snapshot/resume mode (no eval)
         prioritization_min_val=0.5,
         prioritization_max_val=2.0,

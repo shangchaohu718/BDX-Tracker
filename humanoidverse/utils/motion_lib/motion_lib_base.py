@@ -326,11 +326,12 @@ class MotionLibBase():
         self.all_motions_loaded = True
         self.load_motions(random_sample=False,  num_motions_to_load=self._num_unique_motions)
 
-    def load_motions(self, 
-                     random_sample=True, 
-                     start_idx=0, 
-                     max_len=-1, 
-                     target_heading = None, num_motions_to_load = None):
+    def load_motions(self,
+                     random_sample=True,
+                     start_idx=0,
+                     max_len=-1,
+                     target_heading = None, num_motions_to_load = None,
+                     num_jobs: int | None = None):
         
         if "gts" in self.__dict__:
             del self.gts, self.grs, self.lrs, self.grvs, self.gravs, self.gavs, self.gvs, self.dvs, self.dof_pos
@@ -379,8 +380,12 @@ class MotionLibBase():
         torch.set_num_threads(1)
         manager = mp.Manager()
         queue = manager.Queue()
-        num_jobs = min(mp.cpu_count(), 8)
-        
+        # [MEM] explicit num_jobs=1 documents the in-process path; NOTE the original formula
+        # (min(cpu,8) then "<= 16 -> 1") always reduced to 1, so the forked-worker branch was
+        # effectively dead. Default None preserves that exact behavior.
+        if num_jobs is None:
+            num_jobs = min(mp.cpu_count(), 8)
+
         if num_jobs <= 16 or not self.multi_thread:
             num_jobs = 1
         res_acc = {}  # using dictionary ensures order of the results.

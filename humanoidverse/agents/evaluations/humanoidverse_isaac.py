@@ -323,11 +323,22 @@ class HumanoidVerseIsaacTrackingEvaluation:
             # If we have less envs than motions, we run iteratively over the motions
             for motion_id_chunk_start in range(0, len(self.motion_ids), n_envs):
                 motion_id_chunk = self.motion_ids[motion_id_chunk_start : motion_id_chunk_start + n_envs]
+                # [MEM] chunked eval loading: only the motions being evaluated this pass are
+                # resident in the motion lib (one ~n_envs-motion staging pass) instead of the
+                # whole 10k-motion corpus (~7G x2 host copies). load_motions() replaces the
+                # previously loaded set, so peak memory is a single chunk. Local ids 0..c-1 map
+                # in order to unique ids [start, start+c) via random_sample=False + start_idx.
+                env._env._motion_lib.load_motions(
+                    random_sample=False,
+                    num_motions_to_load=len(motion_id_chunk),
+                    start_idx=motion_id_chunk_start,
+                )
                 motion_chunk_results = _async_tracking_worker(
-                    (motion_id_chunk, 0, agent_or_model),
+                    (list(range(len(motion_id_chunk))), 0, agent_or_model),
                     env=env,
                     disable_tqdm=self.cfg.disable_tqdm,
                     include_results_from_all_envs=self.cfg.include_results_from_all_envs,
+                    motions_preloaded=True,
                 )
                 for k, v in motion_chunk_results.items():
                     assert k not in run_metrics, "Tried to override existing metric"
@@ -357,9 +368,14 @@ class HumanoidVerseIsaacTrackingEvaluation:
                 v["timestep"] = timestep
                 logger.log(v)
 
-        # Resume back to original state of the motion lib if we were using shared env
+        # Resume back to original state of the motion lib if we were using shared env.
+        # [MEM] after chunked loading, all_motions_loaded is False, so this actually
+        # re-draws a training-size random sample (previously the flag short-circuited
+        # the reload and left the full corpus resident). max_num_seqs is capped to the
+        # env's num_envs so the staging pass stays single-chunk sized.
         if self.cfg.env is None:
-            env._env._motion_lib.load_motions_for_training()
+            env._env._motion_lib.all_motions_loaded = False
+            env._env._motion_lib.load_motions_for_training(max_num_seqs=env._env.num_envs)
         env._env.set_is_training()
 
         return metrics, wandb_dict
@@ -391,7 +407,8 @@ def group_assign_motions_to_envs_with_map(motion_ids, num_envs, device=None):
 
 
 def _async_tracking_worker(
-    inputs, env: HumanoidVerseVectorEnv, disable_tqdm: bool = False, include_results_from_all_envs=False
+    inputs, env: HumanoidVerseVectorEnv, disable_tqdm: bool = False, include_results_from_all_envs=False,
+    motions_preloaded: bool = False,
 ):
     motion_ids, pos, agent = inputs
     model = extract_model(agent)
@@ -399,7 +416,7 @@ def _async_tracking_worker(
     # motion_ids = torch.tensor(motion_ids, device=env.device)
     isaac_env = env._env
 
-    if not isaac_env._motion_lib.all_motions_loaded:
+    if not motions_preloaded and not isaac_env._motion_lib.all_motions_loaded:
         isaac_env._motion_lib.all_motions_loaded = True
         isaac_env._motion_lib.load_motions(random_sample=False, num_motions_to_load=isaac_env._motion_lib._num_unique_motions, start_idx=0)
 

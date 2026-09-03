@@ -380,8 +380,16 @@ class Discriminator(nn.Module):
         return logits
 
     def compute_reward(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-        s = self.forward(obs, z)
-        s = torch.clamp(s, eps, 1 - eps)
+        # [BFM-FIX 2026-09-02] was: sigmoid in autocast dtype, then clamp(s, eps, 1-eps).
+        # Under bf16 autocast the clamp is a NO-OP: numbers near 1.0 have spacing 2^-8, so
+        # both sigmoid(logit) for logit >~6.3 AND 1-eps round to exactly 1.0 -> log(0) = -inf
+        # -> reward = +inf -> target_Q = inf -> singular linalg.solve crash (deterministic
+        # walls at t=540672 / t=827392 on iters 1-12). Fix: upcast logits to fp32 BEFORE
+        # sigmoid, and clamp the LOGIT to a finite range so even fp32 saturation cannot
+        # produce exactly 0/1. clamp(-20, 20) keeps reward bounded by ±20 (~e^-9 tail mass).
+        s = self.compute_logits(obs, z)
+        s = torch.clamp(s, -20.0, 20.0).float()
+        s = torch.sigmoid(s).clamp(eps, 1 - eps)
         reward = s.log() - (1 - s).log()
         return reward
 

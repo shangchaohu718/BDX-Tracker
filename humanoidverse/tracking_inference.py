@@ -1,6 +1,6 @@
 import os
 
-os.environ["MUJOCO_GL"] = "egl"  # Use EGL for rendering
+os.environ.setdefault("MUJOCO_GL", "egl")  # offscreen default; MUJOCO_GL=glfw + --no-headless for a live window
 os.environ["OMP_NUM_THREADS"] = "1"
 
 from datetime import datetime
@@ -71,7 +71,7 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
             {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
             z_dim=model.cfg.archi.z_dim,
             history=('history_actor' in model.cfg.archi.actor.input_filter.key),
-            use_29dof=True,
+            dof=model.action_dim,  # BDX=14 (state_end=34); legacy use_29dof assumes G1's 64/+29 layout
         )
         print(f"Exported model to {output_dir}/{model_name}.onnx")
     except Exception as e:
@@ -102,6 +102,16 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
     output_dir = model_folder / "tracking_inference"
 
     for MOTION_ID in motion_list:
+        # Motion ids index the SORTED key list of the EVAL pkl (--data-path), not the
+        # training pkl. Out-of-range ids are silently clamped to the LAST clip by
+        # motion_lib_base.load_motions (torch.clamp(..., max=num_unique-1)) — e.g.
+        # bdx_walkexport.pkl has 1174 motions, so ids >= 1174 all evaluate the same
+        # final clip. Warn loudly instead of evaluating the wrong motion silently.
+        _n_eval = getattr(env._motion_lib, "_num_unique_motions", None)
+        if _n_eval is not None and MOTION_ID >= _n_eval:
+            print(f"WARNING: motion id {MOTION_ID} >= num motions in eval data ({_n_eval}) — "
+                  f"will be CLAMPED to the last clip '{sorted(env._motion_lib._motion_data_keys)[-1]}'. "
+                  f"Use ids < {_n_eval} or pass --data-path with the full corpus.")
         env.set_is_evaluating(MOTION_ID)
         # MOTION_ID is the pkl index (start_idx) of the motion to load into env 0.
         # IMPORTANT: read the clip name from the motion ACTUALLY loaded into env 0
@@ -147,6 +157,9 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         }
         env_ids = torch.arange(num_envs, dtype=torch.long)
         observation, info = wrapped_env._env.reset_envs_idx(env_ids, target_states=target_states)
+        # Local (loaded) index of the eval clip in the motion lib — after
+        # load_motions_for_evaluation only this clip is resident, so motion_ids[0] IS it.
+        eval_motion_local_id = int(env.motion_ids[0].item())
         observation_new, reward, terminated, truncated, info = wrapped_env.step(torch.zeros((num_envs, wrapped_env.action_space.shape[-1]), dtype=torch.float32), to_numpy=False)
         observation = wrapped_env._get_g1env_observation(to_numpy=False)
         qpos, qvel = wrapped_env._get_qpos_qvel(to_numpy=True)
@@ -158,9 +171,17 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         print(f"Saving video for tracking ({ep_len} steps)")
         if save_mp4:
             rgb_renderer = IsaacRendererWithMuJoco(render_size=256)
-            # Only render 1 + ep_len frames (same as frames list), not the full motion
-            expert_video = rgb_renderer.from_qpos(expert_qpos[: 1 + ep_len])
-            frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]
+            # Only render 1 + ep_len frames (same as frames list), not the full motion.
+            # from_qpos is G1-only (expects 36-D qpos, 7 free + 29 joints); skip the
+            # expert comparison video for other robots (BDX = 21-D qpos).
+            expert_video = None
+            if expert_qpos.shape[-1] == 36:
+                expert_video = rgb_renderer.from_qpos(expert_qpos[: 1 + ep_len])
+                frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]
+            else:
+                # Non-G1 robots: the mujoco backend's own offscreen renderer
+                print(f"Skipping expert video: from_qpos is G1-only, got {expert_qpos.shape[-1]}-D qpos")
+                frames = [wrapped_env._env.simulator.render()]
 
         print(f"Running tracking inference for {ep_len} steps")
         # Measurement policy: LOG, DON'T INTERFERE. The rollout always runs the full
@@ -173,19 +194,41 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         root_h_hist = []  # per-frame live root height (physical-fall log)
         dif_norm_hist = []  # per-frame mean per-body tracking error (env's canonical dif_global_body_pos)
         env_terminated_hist = []  # per-frame motion-far termination flag (tracking-loss log)
+        zi = 0  # index into the z sequence; restarts from 0 whenever the episode restarts
         for i in range(ep_len):
-            action = model.act(observation, z[i % len(z)].repeat(num_envs, 1), mean=True)
+            action = model.act(observation, z[zi % len(z)].repeat(num_envs, 1), mean=True)
+            zi += 1
             observation, reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
             # --- log only, no early stop ---
             env_terminated = bool(terminated[0].cpu().item()) if terminated.ndim > 0 else bool(terminated.cpu().item())
             env_terminated_hist.append(env_terminated)
+            env_truncated = bool(truncated[0].cpu().item()) if truncated.ndim > 0 else bool(truncated.cpu().item())
+
+            if env_terminated or env_truncated:
+                # [EVAL-RESTART] The env's auto-reset re-samples motions and snaps the
+                # reference back to frame 0 while leaving the fallen robot wherever it is
+                # (reset_envs_idx -> _resample_motion_time_and_ids) — the visible
+                # "motion swap" mid-episode in the live render. Instead: re-pin the eval
+                # clip, restore the robot to the reference start state, and restart the
+                # z sequence with it, so the episode retries from the top in sync.
+                print(f"  [EVAL-RESTART] env reset at step {i} "
+                      f"(terminated={env_terminated}, truncated={env_truncated}) — restarting episode in sync")
+                env.motion_ids[:] = eval_motion_local_id
+                env.motion_len[:] = env._motion_lib.get_motion_length(env.motion_ids)
+                env.motion_start_times[:] = 0.0
+                observation, info = wrapped_env._env.reset_envs_idx(env_ids, target_states=target_states)
+                observation = wrapped_env._get_g1env_observation(to_numpy=False)
+                zi = 0
             root_h_hist.append(float(wrapped_env._env.simulator._rigid_body_pos[0, 0, 2].cpu().item()))
             # env already computes the aligned (31 vs 31) per-body tracking error each step
             dif_global = wrapped_env._env.dif_global_body_pos[0]  # [num_bodies_total, 3]
             dif_norm_hist.append(float(torch.norm(dif_global, dim=-1).mean().item()))
             joint_pos.append(wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy())
             if save_mp4:
-                frames.append(rgb_renderer.render(wrapped_env._env, 0)[0])
+                if expert_video is not None:
+                    frames.append(rgb_renderer.render(wrapped_env._env, 0)[0])
+                else:
+                    frames.append(wrapped_env._env.simulator.render())
 
         joint_pos = np.stack(joint_pos, axis=0).squeeze(1)
         # mean per-body tracking error over the FULL clip (no truncation by any signal)
@@ -209,9 +252,12 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         print(f"  STATS {stats}")
 
         if save_mp4:
-            new_frames = []
-            for a, b in zip(expert_video, frames):
-                new_frames.append(np.concatenate([a, b], axis=1))
+            if expert_video is not None:
+                new_frames = []
+                for a, b in zip(expert_video, frames):
+                    new_frames.append(np.concatenate([a, b], axis=1))
+            else:
+                new_frames = frames
             # Tag with simulator + MMDDHH timestamp so runs across backends AND time don't clobber.
             _ts = datetime.now().strftime("%m%d%H")
             video_path = output_dir / f"tracking_{clip_name}__{simulator}__{_ts}.mp4"

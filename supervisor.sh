@@ -26,7 +26,10 @@ set -u
 PROJECT=/root/epfs/tcl/bdx_BFMzero
 cd "$PROJECT" || { echo "no project dir"; exit 1; }
 export PATH="$HOME/.local/bin:$PATH"
-export BFM_ZERO_PROFILE=h20
+# Profile defaults to h20 (G1) but MUST NOT clobber an explicitly-set profile
+# (e.g. BFM_ZERO_PROFILE=bdx for the BDX bring-up). Robot likewise defaults to G1.
+export BFM_ZERO_PROFILE="${BFM_ZERO_PROFILE:-h20}"
+export BFM_ZERO_ROBOT="${BFM_ZERO_ROBOT:-g1}"
 
 # --- run-mode selection (arg > env > default) --------------------------------- #
 MODE="${1:-${BFM_ZERO_RUN_MODE:-fresh}}"
@@ -41,12 +44,30 @@ case "$MODE" in
     DEFAULT_WORK_DIR="results/bfmzero-isaac-diag-resume"
     DEFAULT_TARGET=750000000       # extended target past paper scale
     ;;
-  *)  # snapshot is a one-shot debug mode (exits during seeding); not driven by this supervisor
-    echo "unknown/unsupported mode '$MODE' for the supervisor (use: fresh | resume)"; exit 1 ;;
+esac
+# BDX: default to a BDX-specific run dir so it never collides with G1 results,
+# unless the caller explicitly set BFM_ZERO_WORK_DIR.
+if [ "$BFM_ZERO_ROBOT" = "bdx" ]; then
+  case "$MODE" in
+    fresh)  DEFAULT_WORK_DIR="results/bfmzero-bdx" ;;
+    resume) DEFAULT_WORK_DIR="results/bfmzero-bdx-resume" ;;
+  esac
+fi
+# Unknown mode (e.g. snapshot) is a one-shot debug mode (exits during seeding);
+# not driven by this supervisor.
+case "$MODE" in
+  fresh|resume) ;;
+  *) echo "unknown/unsupported mode '$MODE' for the supervisor (use: fresh | resume)"; exit 1 ;;
 esac
 export BFM_ZERO_WORK_DIR="${BFM_ZERO_WORK_DIR:-$DEFAULT_WORK_DIR}"
 export BFM_ZERO_NAN_RESET=1     # per-substep isfinite NaN-reset safety net (the validated fix)
 export PYTHONUNBUFFERED=1       # child prints stream to the per-iter log instead of block-buffering
+# [MEM] cgroup memory.max is 64GiB; per-eval transient spikes (~20GB, freed to malloc but
+# never returned to the OS) ratchet RSS up across glibc's per-thread arenas until the cgroup
+# OOM killer SIGKILLs the trainer mid-eval. Cap arenas + trim aggressively so freed eval
+# memory actually returns to the OS. Env-only fix: picked up at the next relaunch.
+export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=67108864      # 64MB: trim freed top-of-heap back to OS
 
 RUN_DIR="$BFM_ZERO_WORK_DIR"
 TS="$RUN_DIR/checkpoint/train_status.json"
@@ -62,6 +83,12 @@ echo "[$(now)] supervisor START mode=$MODE target=$TARGET run_dir=$RUN_DIR" | te
 
 iter=0
 MAX_ITER=80
+# Take-over guard: if a trainer launched by a PREVIOUS supervisor instance is still alive,
+# do not double-launch -- wait for it to exit (natural death or otherwise) before relaunching.
+while pgrep -f "humanoidverse.train" >/dev/null 2>&1; do
+  echo "[$(now)] existing trainer still alive; new supervisor waiting for it to exit before taking over" | tee -a "$LOG"
+  sleep 60
+done
 MIN_RUN_SEC=600   # a legit run lasts ~4h; shorter than this with no progress = real crash
 while [ $iter -lt $MAX_ITER ]; do
   iter=$((iter + 1))

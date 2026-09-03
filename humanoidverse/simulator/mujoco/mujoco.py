@@ -230,8 +230,12 @@ class MuJoCo(BaseSimulator):
         if isinstance(torques, torch.Tensor):
             torques = torques.cpu().numpy()
         if self.freebase:
-            self.data.ctrl[6:] = torques
-        else:   
+            # Offset = G1's virtual base actuators (fx..tz) before the joint motors;
+            # robots without them (BDX: nu == num_dof) get offset 0. Same fix as
+            # mujoco_warp.apply_torques_at_dof.
+            ctrl_offset = self.model.nu - self.num_dof
+            self.data.ctrl[ctrl_offset:] = torques
+        else:
             self.data.ctrl[:] = torques
         # mujoco.mj_step(self.model, self.data)
     
@@ -403,25 +407,29 @@ class MuJoCo(BaseSimulator):
         """
         Renders the simulation frame-by-frame, syncing frame time if required.
 
+        When a passive viewer is open (--no-headless), it is already synced every
+        physics step in simulate_at_each_physics_step; nothing to do here.
+
         Args:
             sync_frame_time (bool): Whether to synchronize the frame time.
         """
+        if self.viewer is not None:
+            return
         if self.renderer is None:
             self.renderer = mujoco.Renderer(
                 self.model,
                 width=self.render_width,
                 height=self.render_height,
             )
+        cam_names = {
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_CAMERA, i)
+            for i in range(self.model.ncam)
+        }
         self.renderer.update_scene(
             self.data,
-            camera="track"
+            camera="track" if "track" in cam_names else -1,  # -1 = default free camera (models without a "track" cam, e.g. BDX)
         )
         return self.renderer.render()
-        if self.viewer is None:
-            raise RuntimeError("Viewer is not initialized. Call 'setup_viewer' first.")
-        return
-        # mujoco.mj_step(self.model, self.data)
-        # self.viewer.sync()
 
     @property
     def dof_state(self):

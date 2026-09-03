@@ -260,6 +260,9 @@ class FBAgent:
                     with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=False):
                         cov = torch.matmul(B.T, B) / B.shape[0]  # z_dim x z_dim
                     # inv_cov = torch.inverse(cov)  # z_dim x z_dim
+                    # [RIDGE] guard against rank-collapsed B^T B (singular solve crash, bdx3 @55M)
+                    ridge = 1e-4 * torch.diagonal(cov).mean()
+                    cov = cov + ridge * torch.eye(cov.shape[-1], device=cov.device, dtype=cov.dtype)
                     B_inv_conv = torch.linalg.solve(cov, B, left=False)
                     implicit_reward = (B_inv_conv * z).sum(dim=-1)  # batch
                     target_Q = implicit_reward.detach() + discount.squeeze() * next_Q  # batch

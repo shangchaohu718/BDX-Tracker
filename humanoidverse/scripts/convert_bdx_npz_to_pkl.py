@@ -187,10 +187,17 @@ def main():
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--npz", help="single segmented motion_library.npz (18 clips)")
     src.add_argument("--npz-dir", help="directory of per-clip NPZs (legacy)")
+    src.add_argument("--manifest", help="manifest.json of a curated export: split by "
+                    "eval_only (train -> clipped windows, eval -> whole clips)")
     ap.add_argument("--skeleton", required=True, help="path to bdx_v4.xml")
     ap.add_argument("--out-dir", default="humanoidverse/data")
+    ap.add_argument("--out-prefix", default=None,
+                    help="output pkl basename (default: bdx_14dof; e.g. bdx_walkexport)")
     ap.add_argument("--clip-seconds", type=float, default=10.0,
                     help="window length for the _clipped training pkl (seconds)")
+    ap.add_argument("--no-window", action="store_true",
+                    help="write the training pkl as whole variable-length clips (loader "
+                    "packs var-length motions and random-crops to config max_len)")
     ap.add_argument("--fps", type=int, default=None, help="override fps (default: read from NPZ)")
     args = ap.parse_args()
 
@@ -199,7 +206,25 @@ def main():
 
     # ---- collect whole clips ----
     whole = {}  # name -> entry
-    if args.npz:
+    eval_only_names = set()
+    if args.manifest:
+        man = json.load(open(args.manifest))
+        root = os.path.dirname(os.path.abspath(args.manifest))
+        entries = man["clips"] if isinstance(man, dict) else man
+        train_files, eval_files = [], []
+        for c in entries:
+            f = os.path.join(root, c["export_path"])
+            (eval_files if c.get("eval_only") else train_files).append(f)
+        print(f"Manifest: {len(entries)} clips -> train {len(train_files)} / eval {len(eval_files)}")
+        for f in train_files:
+            name = os.path.splitext(os.path.basename(f))[0]
+            whole[name] = npz_to_clip_entry(f, skeleton, fps_override=args.fps)
+        for f in eval_files:
+            name = os.path.splitext(os.path.basename(f))[0]
+            eval_only_names.add(name)
+        base_fps = args.fps if args.fps else int(round(float(
+            np.load((train_files + eval_files)[0], allow_pickle=True)["fps"])))
+    elif args.npz:
         print(f"Segmented library: {args.npz}")
         for name, entry in segmented_npz_to_clips(args.npz, skeleton, fps_override=args.fps):
             whole[name] = entry
@@ -220,17 +245,33 @@ def main():
 
     # ---- windowed training clips ----
     windowed = {}
-    for name, entry in whole.items():
-        for sub_name, sub_entry in clip_windows(entry, clip_frames, name):
-            windowed[sub_name] = sub_entry
+    if not args.no_window:
+        for name, entry in whole.items():
+            for sub_name, sub_entry in clip_windows(entry, clip_frames, name):
+                windowed[sub_name] = sub_entry
+    else:
+        windowed = whole  # variable-length whole clips (loader random-crops to max_len)
+
+    # eval pkl = whole clips. In manifest mode eval clips are a separate set;
+    # in flat mode eval = all whole clips (previous convention).
+    prefix = args.out_prefix or "bdx_14dof"
+    if args.manifest:
+        eval_whole = {}
+        for f in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(args.manifest)),
+                                               "**", "*.npz"), recursive=True)):
+            name = os.path.splitext(os.path.basename(f))[0]
+            if name in eval_only_names and name not in whole:
+                eval_whole[name] = npz_to_clip_entry(f, skeleton, fps_override=args.fps)
+    else:
+        eval_whole = whole
 
     os.makedirs(args.out_dir, exist_ok=True)
-    eval_path = os.path.join(args.out_dir, "bdx_14dof.pkl")
-    train_path = os.path.join(args.out_dir, "bdx_14dof_clipped.pkl")
-    joblib.dump(whole, eval_path, compress=3)
+    eval_path = os.path.join(args.out_dir, f"{prefix}.pkl")
+    train_path = os.path.join(args.out_dir, f"{prefix}_clipped.pkl")
+    joblib.dump(eval_whole, eval_path, compress=3)
     joblib.dump(windowed, train_path, compress=3)
 
-    tot_frames_whole = sum(v["pose_aa"].shape[0] for v in whole.values())
+    tot_frames_whole = sum(v["pose_aa"].shape[0] for v in eval_whole.values())
     tot_frames_clip = sum(v["pose_aa"].shape[0] for v in windowed.values())
     # per-kind summary
     def kind_of(nm):
@@ -239,7 +280,7 @@ def main():
         return "gesture"
     from collections import Counter
     wk = Counter(kind_of(n) for n in windowed)
-    print(f"\nWrote {eval_path}: {len(whole)} clips, {tot_frames_whole} frames "
+    print(f"\nWrote {eval_path}: {len(eval_whole)} clips, {tot_frames_whole} frames "
           f"({tot_frames_whole/base_fps/60:.1f} min)")
     print(f"Wrote {train_path}: {len(windowed)} windows, {tot_frames_clip} frames "
           f"({tot_frames_clip/base_fps/60:.1f} min)")

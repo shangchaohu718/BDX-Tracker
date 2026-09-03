@@ -100,6 +100,42 @@ class FBcprAuxAgent(FBcprAgent):
 
         for _name, _tree in named_batches:
             _scan(_tree, _name)
+        # [BFM-DIAG-HUGE] 2026-09-02: the 540k crash is NOT non-finite data in the buffer (0
+        # [BFM-FINITE-BUFFER] drops across iters 8-10) — the sampled batch is FINITE here, yet
+        # mean_disc_reward/target_Q hit inf downstream and cov=B^T B goes singular. Prime suspect:
+        # an EXTREME-BUT-FINITE obs value overflowing D/B forward passes. Record per-key max|value|
+        # and dump the first batches exceeding 1e4 (raw, pre-normalizer).
+        _MAG_THRESHOLD = 1e4
+        maxima = {}
+
+        def _scan_mag(tree, prefix):
+            if not isinstance(tree, dict):
+                return
+            for k, v in tree.items():
+                key = f"{prefix}/{k}" if prefix else k
+                if isinstance(v, dict):
+                    _scan_mag(v, key)
+                elif torch.is_tensor(v) and v.numel() and v.dtype.is_floating_point:
+                    maxima[key] = v.abs().max()
+
+        for _name, _tree in named_batches:
+            _scan_mag(_tree, _name)
+        _worst = torch.stack(list(maxima.values())).max().item() if maxima else 0.0  # one host sync for all keys
+        if _worst > _MAG_THRESHOLD:
+            self._diag_huge_count = getattr(self, "_diag_huge_count", 0) + 1
+            if self._diag_huge_count <= 3:
+                _top = sorted(maxima.items(), key=lambda kv: -kv[1].item())[:6]
+                print(f"[BFM-DIAG-HUGE] step={step}: batch max|value|={_worst:.3e} exceeds {_MAG_THRESHOLD:g}; "
+                      f"top keys: {[(k, f'{v.item():.3e}') for k, v in _top]}", flush=True)
+                try:
+                    from pathlib import Path as _P
+
+                    _dump_dir = _P("poison_dumps")
+                    _dump_dir.mkdir(parents=True, exist_ok=True)
+                    torch.save(dict(named_batches), _dump_dir / f"update_batch_step{step}.pt")
+                    print(f"[BFM-DIAG-HUGE] dumped raw batch to {_dump_dir / f'update_batch_step{step}.pt'}", flush=True)
+                except Exception as e:  # diagnostics must never kill training
+                    print(f"[BFM-DIAG-HUGE] dump failed (non-fatal): {e}", flush=True)
         if not counts:
             return
         total = sum(counts.values()).item()
