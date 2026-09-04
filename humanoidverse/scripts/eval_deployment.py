@@ -51,6 +51,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-clips", type=int, default=600)
     args = ap.parse_args()
+    # SUPERSEDED guard (user ruling 2026-09-04): refuse to (re)write the
+    # stale canonical deployment_eval.json — redirect output to a
+    # timestamped dir via BDX_PLANNER_DATA instead.
+    from humanoidverse.planner.authority import guard_eval_entry
+    guard_eval_entry("bdx_planner_v2combo/deployment_eval.json",
+                     output_path=OUT_DIR / "deployment_eval.json")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _reg = resolve_canonical(OUT_DIR)
     print(f"canonical: {_reg['planner'].name} + {_reg['teacher'].name} "
