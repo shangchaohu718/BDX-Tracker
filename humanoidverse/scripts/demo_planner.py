@@ -65,16 +65,18 @@ def render_rollout(model, data, renderer, cam_pos, qpos_traj):
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from humanoidverse.planner.registry import resolve_canonical
+    _reg = resolve_canonical(OUT_DIR)
+    print(f"canonical: {_reg['planner'].name} + {_reg['teacher'].name}")
     teacher = MotionAE(in_dim=MODEL_DIM, latent_dim=64).to(device).eval()
     teacher.load_state_dict(torch.load(_reg["teacher"], map_location=device,
                                        weights_only=False)["model"])
     from humanoidverse.planner.model import CommandedEncoder
-    student = CommandedEncoder(latent_dim=64).to(device).eval()
-    from humanoidverse.planner.registry import resolve_canonical
-    _reg = resolve_canonical(OUT_DIR)
-    print(f"canonical: {_reg['planner'].name} + {_reg['teacher'].name}")
-    student.load_state_dict(torch.load(_reg["planner"], map_location=device,
-                                       weights_only=False)["model"])
+    sck = torch.load(_reg["planner"], map_location=device, weights_only=False)
+    cmd_dim = 7 if sck["config"].get("loco_cmd") else 4
+    student = CommandedEncoder(latent_dim=sck["config"]["latent"],
+                               cmd_dim=cmd_dim).to(device).eval()
+    student.load_state_dict(sck["model"])
     stats = load_stats(OUT_DIR / "p1_stats.json")
     sp_stats = {k: torch.tensor(v) for k, v in json.loads(
         (OUT_DIR / "p2_stats32.json").read_text()).items()}
@@ -97,7 +99,20 @@ def main():
     sp_fut = canonical_sparse(f_fut, psi)
     sp_hist = canonical_sparse(f_hist, psi)
 
-    cmd0 = torch.from_numpy(f_fut["q"][:, 10:14].astype(np.float32)) / 1.7
+    neck_cmd = torch.from_numpy(f_fut["q"][:, 10:14].astype(np.float32)) / 1.7
+    if cmd_dim == 7:
+        # v11/v12 lineage: 7D cmd = neck(4)/1.7 + loco(3) from the future
+        # window's canonical-frame mean velocities, scales (1.0, 0.5, 1.5)
+        # (dataset contract, P2Dataset.__getitem__)
+        c2, sn2 = float(np.cos(psi)), float(np.sin(psi))
+        Rzf = np.array([[c2, sn2, 0.], [-sn2, c2, 0.], [0., 0., 1.]], np.float32)
+        lv_c = f_fut["base_linvel"].astype(np.float32) @ Rzf.T
+        av_c = f_fut["base_angvel"].astype(np.float32) @ Rzf.T
+        loco = torch.tensor([lv_c[:, 0].mean() / 1.0, lv_c[:, 1].mean() / 0.5,
+                             av_c[:, 2].mean() / 1.5], dtype=torch.float32)
+        cmd0 = torch.cat([neck_cmd, loco[None, :].expand(WINDOW, 3)], -1)
+    else:
+        cmd0 = neck_cmd
     p_base, _ = complete(student, teacher, stats, sp_stats, sp_fut, sp_hist, device, cmd0)
     cmd_edit = cmd0.clone()
     cmd_edit[:, 2] = HEAD_LOOK_LEFT_YAW   # explicit neck_yaw command (P2.8)
