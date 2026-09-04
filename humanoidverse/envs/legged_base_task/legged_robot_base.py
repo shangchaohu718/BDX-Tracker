@@ -424,6 +424,28 @@ class LeggedRobotBase(BaseTask):
             if torch.rand(1) < self.config.termination_probality.terminate_when_close_to_torque_limit:
                 self.reset_buf |= out_of_torque_limits > 0.
 
+        # [BFM-DIAG-NAN] Fix #1 (Arm B) — DETERMINISTIC hard-joint-limit safety reset.
+        # Root cause (pinned via cross-backend replay of a captured divergence-onset state):
+        # when a joint starts a physics step ALREADY PAST its hard jnt_range, mujoco_warp's limit
+        # constraint solve produces NaN qfrc_constraint -> NaN qacc/qvel, which poisons the obs
+        # batch and diverges training. PhysX tolerates/clamps a past-limit start; mujoco_warp does
+        # not. The trigger is purely a joint-POSITION-limit violation (e.g. left_ankle_roll at
+        # +0.473 vs limit +0.26) — proven: zeroing torque/velocity/base-position or switching to the
+        # implicit integrator does NOT prevent the NaN; only clamping the violating joint does.
+        # So reset any env whose joint is past its HARD limit, DETERMINISTICALLY (unlike the
+        # probabilistic `terminate_when_close_to_dof_pos_limit` above, which only fires 25% of the
+        # time and would itself crash — dof_pos_limits_termination is only defined on the
+        # mujoco/isaacgym backends, not mujoco_warp/isaacsim). hard_dof_pos_limits IS defined on
+        # both mujoco_warp and isaacsim. Gated by BFM_ZERO_HARD_LIMIT_RESET (default: 1 = on, this
+        # is a pure safety net that never alters a non-diverging env). Disabled under
+        # BFM_ZERO_HARD_LIMIT_RESET=0 to reproduce the baseline NaN.
+        import os as _os
+        if _os.environ.get("BFM_ZERO_HARD_LIMIT_RESET", "1") != "0":
+            _hard = getattr(self.simulator, "hard_dof_pos_limits", None)
+            if _hard is not None:
+                _past = (self.simulator.dof_pos < _hard[:, 0]) | (self.simulator.dof_pos > _hard[:, 1])
+                self.reset_buf |= _past.any(dim=1)
+
 
     def _update_timeout_buf(self):
         self.time_out_buf |= self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs

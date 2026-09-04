@@ -165,6 +165,11 @@ robot:
     uniform_sample: False
     motion_fps_scale: 1.0
 
+    # Keep expert rigid-body angular velocity semantically aligned with the
+    # simulator's instantaneous cvel.  The legacy sigma=2 temporal smoothing
+    # made discriminator inputs source-identifiable (expert-only filtering).
+    smooth_angular_velocity: false
+
     standardize_motion_length: True
     standardize_motion_length_value: 10
 
@@ -178,11 +183,21 @@ robot:
     real_weight_porpotion_capsules: True
     real_weight_porpotion_boxes: True
 
-    # foot_contact_detect thresholds. G1 defaults (0.07/0.4) are tuned to its
-    # ~0.1m ankle height; BDX ankle is ~0.04m standing, so lower both. Drives the
-    # contact_binary obs consumed by policy + discriminator (legged_robot_motions.py:598).
-    foot_contact_height_thres: 0.04
+    # foot_contact_detect thresholds. VALIDATED against source data 2026-08-18:
+    # standing ankle-link origin sits at z≈0.0736 m, swing peaks at ~0.108 m, so
+    # height 0.08 separates stance from swing (0.07/G1 default or the old 0.04
+    # value here never fired — contact_binary obs was ~all zeros). Drives the
+    # contact_binary obs consumed by policy + discriminator
+    # (legged_robot_motions.py foot_contact_detect).
+    foot_contact_height_thres: 0.08
     foot_contact_vel_thres: 0.3
+
+    # Contact obs gate: when True, foot_contact_detect output enters the
+    # actor observation. Requires THREE synchronized changes to enable
+    # (yaml flag + code path + helpers.py dim calc). Pre-2026-08-19 this was
+    # never enabled — all prior tracker training ran WITHOUT contact in obs.
+    # Baseline runs with False; contact-aware variant is a separate feature.
+    use_contact_in_obs_max: False
 
     body_names: ['base_link',
                  'left_hip_yaw_link', 'left_hip_roll_link', 'left_hip_pitch_link', 'left_knee_link', 'left_ankle_link',

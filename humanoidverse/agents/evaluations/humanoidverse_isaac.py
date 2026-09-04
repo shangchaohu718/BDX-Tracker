@@ -223,7 +223,9 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
         base_quat = ref_body_rots[:, 0]  # root orientation
         # ref_dof_pos = motion_state["dof_pos"] - env.default_dof_pos[0]
         # ref_dof_vel = motion_state["dof_vel"]
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        ref_ang_vel = quat_rotate_inverse(
+            base_quat, ref_body_angular_vels[:, 0], w_last=True
+        )
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
         bogus_actions = ref_dof_pos
 
@@ -485,6 +487,10 @@ def _async_tracking_worker(
         joint_vel = [isaac_env.simulator.dof_state[..., 1]]
 
         max_ctx_len = max([ctx.shape[0] for ctx in ctx_dict.values()])
+        # [BDX-COMPLETION] per-env first-done step and reset count -> motion completion rate
+        _NEVER = 2**31
+        _first_done = torch.full((num_envs,), _NEVER, dtype=torch.long)
+        _n_resets = torch.zeros(num_envs, dtype=torch.long)
         for step in tqdm(range(max_ctx_len), desc="Tracking Evaluation", disable=disable_tqdm):
             ctx_batch = []
             for env_id in range(num_envs):
@@ -495,6 +501,9 @@ def _async_tracking_worker(
             ctx_batch = torch.stack(ctx_batch)
             action = agent.act(observation, ctx_batch, mean=True)
             observation, reward, terminated, truncated, info = env.step(action, to_numpy=False)
+            _done = (terminated.bool() | truncated.bool()).cpu()
+            _n_resets += _done.long()
+            _first_done[(_done & (_first_done == _NEVER))] = step
             joint_pos.append(isaac_env.simulator.dof_state[..., 0])
             joint_vel.append(isaac_env.simulator.dof_state[..., 1])
             xpos_log.append(isaac_env.simulator._rigid_body_pos.reshape(num_envs, -1, 3))
@@ -536,6 +545,13 @@ def _async_tracking_worker(
                 # Rename the metrics so that repetitions do not overlap
                 assert len(local_metrics) == 1
                 metric_key = list(local_metrics.keys())[0]
+
+                # [BDX-COMPLETION] completion = fraction of the motion tracked before the first
+                # reset (1.0 = the whole motion without a single termination), plus reset count
+                _L = ctx_dict[m_id].shape[0]
+                _fd = int(_first_done[env_id])
+                local_metrics[metric_key]["completion"] = (min(_fd, _L) / _L) if _L > 0 else 0.0
+                local_metrics[metric_key]["n_resets"] = int(_n_resets[env_id])
 
                 if include_results_from_all_envs:
                     metrics[f"{metric_key}_repetition#{motion_repetition}"] = local_metrics[metric_key]

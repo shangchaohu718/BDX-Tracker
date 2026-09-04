@@ -18,3 +18,8 @@ remote_checkpoint_*.zip
 # Local-only artifacts: fetched wandb offline runs + remote-path scratch launchers
 _wandb/
 _launch_resume.sh
+# [distill-campaign] P1.1: 本地大产物不进 git
+logs/
+model/
+docs/papers/
+humanoidverse/data/

@@ -32,7 +32,10 @@ class LeggedRobotMotions(LeggedRobotBase):
         self._init_motion_lib()
         self._init_motion_extend()
         self._init_tracking_config()
-        self.use_contact_in_obs_max = self.config.get("use_contact_in_obs_max", False)
+        # read from robot.motion (where the yaml key lives), not env root —
+        # the old path never matched and contact was silently excluded
+        self.use_contact_in_obs_max = self.config.robot.motion.get(
+            "use_contact_in_obs_max", False)
         self.init_done = True
         self.debug_viz = True
         self.viewer_focus = False
@@ -154,6 +157,26 @@ class LeggedRobotMotions(LeggedRobotBase):
 
     def _update_timeout_buf(self):
         super()._update_timeout_buf()
+        # [BFM-REF-CURRICULUM] BDX diagnostic/canonical exploration curriculum.
+        #
+        # This environment already resets to a motion-library state.  The
+        # missing piece was *frequency*: the normal 10 s episode lets an
+        # untrained policy spend hundreds of steps far away from the expert
+        # manifold, which teaches the discriminator the spurious rule
+        # "policy motion == fake".  While enabled, start with short anchored
+        # rollouts and linearly restore the original horizon.  All envs share
+        # the same horizon, preserving the vector wrapper's synchronized-reset
+        # invariant when history_actor is enabled.
+        import os as _os
+        if _os.environ.get("BFM_REF_STATE_CURRICULUM", "0") == "1" and not self.is_evaluating:
+            total_env_steps = max(1, int(_os.environ.get("BFM_REF_CURRICULUM_STEPS", "300000")))
+            progress = min(1.0, (self.common_step_counter * self.num_envs) / total_env_steps)
+            horizon_start = max(2, int(_os.environ.get("BFM_REF_HORIZON_START", "8")))
+            horizon_end = max(horizon_start, int(_os.environ.get("BFM_REF_HORIZON_END", str(self.max_episode_length))))
+            horizon = int(round(horizon_start + progress * (horizon_end - horizon_start)))
+            self.time_out_buf |= self.episode_length_buf >= horizon
+            self.log_dict["ref_curriculum_progress"] = torch.tensor(progress, dtype=torch.float32)
+            self.log_dict["ref_curriculum_horizon"] = torch.tensor(float(horizon), dtype=torch.float32)
         if self.config.termination.terminate_when_motion_end:
             current_time = (self.episode_length_buf) * self.dt + self.motion_start_times
             self.time_out_buf |= current_time > self.motion_len
@@ -169,6 +192,146 @@ class LeggedRobotMotions(LeggedRobotBase):
             self.motion_start_times[env_ids] = torch.zeros(len(env_ids), dtype=torch.float32, device=self.device)
         else:
             self.motion_start_times[env_ids] = self._motion_lib.sample_time(self.motion_ids[env_ids])
+
+        # [BFM-REF-CURRICULUM] Prefer genuinely dynamic reference frames early
+        # in training.  Merely resetting to an arbitrary expert frame is not
+        # sufficient: roughly one fifth of the corpus is stand/pose data, and
+        # the remaining rollout can immediately leave the dynamic manifold.
+        # Rejection sampling is local to reset and uses the same motion library
+        # that subsequently constructs root/DOF target states.
+        import os as _os
+        if _os.environ.get("BFM_REF_STATE_CURRICULUM", "0") == "1" and not self.is_evaluating:
+            total_env_steps = max(1, int(_os.environ.get("BFM_REF_CURRICULUM_STEPS", "300000")))
+            progress = min(1.0, (self.common_step_counter * self.num_envs) / total_env_steps)
+            prob_start = float(_os.environ.get("BFM_REF_DYNAMIC_PROB_START", "1.0"))
+            prob_end = float(_os.environ.get("BFM_REF_DYNAMIC_PROB_END", "0.2"))
+            dynamic_prob = prob_start + progress * (prob_end - prob_start)
+            dynamic_prob = max(0.0, min(1.0, dynamic_prob))
+            activity_min = float(_os.environ.get("BFM_REF_ACTIVITY_MIN", "2.0"))
+            max_tries = max(1, int(_os.environ.get("BFM_REF_MAX_TRIES", "12")))
+
+            force_dynamic = torch.rand(len(env_ids), device=self.device) < dynamic_prob
+
+            # [BFM-REF-Z-ALIGN] When a simulator-domain expert pool is supplied
+            # by Train, select the physical reset state from an exact pool
+            # window.  Train later encodes z from the same window.  Without this
+            # coupling, frequent expert resets pair motion A with an independent
+            # latent B and can worsen the conditional discriminator signal.
+            pool = getattr(self, "_bfm_ref_pool_payload", None)
+            if _os.environ.get("BFM_REF_Z_ALIGNED", "0") == "1" and pool is not None:
+                if not hasattr(self, "_bfm_ref_pool_rows"):
+                    self._bfm_ref_pool_rows = torch.full(
+                        (self.num_envs,), -1, dtype=torch.long, device=self.device
+                    )
+                    self._bfm_ref_pool_offsets = torch.zeros(
+                        self.num_envs, dtype=torch.long, device=self.device
+                    )
+                    self._bfm_ref_aligned_mask = torch.zeros(
+                        self.num_envs, dtype=torch.bool, device=self.device
+                    )
+                    # The runtime motion library holds a sampled subset (local
+                    # ids 0..N-1), while pool metadata uses global dataset ids.
+                    # Build an exact global->(local,pool-row) map once.
+                    pool_row_by_global = {
+                        int(meta["motion_id"]): row for row, meta in enumerate(pool["meta"])
+                    }
+                    current_globals = self._motion_lib._curr_motion_ids.detach().cpu().tolist()
+                    eligible = [
+                        (local, pool_row_by_global[int(global_id)])
+                        for local, global_id in enumerate(current_globals)
+                        if int(global_id) in pool_row_by_global
+                    ]
+                    if not eligible:
+                        raise RuntimeError("BFM_REF_Z_ALIGNED found no overlap between runtime motions and pool")
+                    self._bfm_ref_eligible_local = [item[0] for item in eligible]
+                    self._bfm_ref_eligible_rows = [item[1] for item in eligible]
+                self._bfm_ref_aligned_mask[env_ids] = False
+                # Alignment is a semantic invariant for every reset episode;
+                # `force_dynamic` only controls curriculum sampling bias.  At
+                # late training the other rows may sample stand/pose windows,
+                # but their state and z must still come from the same window.
+                aligned_local = torch.arange(len(env_ids), device=self.device)
+                if aligned_local.numel() > 0:
+                    aligned_envs = env_ids[aligned_local.to(env_ids.device)]
+                    chosen_rows_list = []
+                    chosen_offsets = []
+                    seq_len = int(_os.environ.get("BFM_REF_Z_SEQ", "8"))
+                    for _row_i in range(aligned_local.numel()):
+                        require_dynamic = bool(force_dynamic[_row_i].item())
+                        # Select a genuinely dynamic pool frame.  BDX state is
+                        # [14 dof_pos, 14 dof_vel, gravity(3), base_ang_vel(3)].
+                        # The pool was built from the simulator pipeline, so
+                        # this gate uses the exact data later encoded into z.
+                        best_row, best_offset, best_activity = 0, 0, -1.0
+                        for _attempt in range(max_tries):
+                            eligible_i = int(torch.randint(0, len(self._bfm_ref_eligible_rows), (1,)).item())
+                            row = self._bfm_ref_eligible_rows[eligible_i]
+                            length = len(pool["episodes"][row]["truncated"])
+                            max_offset = max(0, length - seq_len)
+                            offset = int(torch.randint(0, max_offset + 1, (1,)).item()) if max_offset else 0
+                            state_row = pool["episodes"][row]["observation"]["state"][offset]
+                            activity_row = float(state_row[14:28].float().norm().item())
+                            if activity_row > best_activity:
+                                best_row, best_offset, best_activity = row, offset, activity_row
+                            if (not require_dynamic) or activity_row >= activity_min:
+                                break
+                        chosen_rows_list.append(best_row)
+                        chosen_offsets.append(best_offset)
+                    chosen_rows = torch.tensor(chosen_rows_list, dtype=torch.long, device=self.device)
+                    chosen_offsets = torch.tensor(chosen_offsets, dtype=torch.long, device=self.device)
+                    meta_rows = chosen_rows.detach().cpu().tolist()
+                    global_to_local = {
+                        int(global_id): local
+                        for local, global_id in enumerate(self._motion_lib._curr_motion_ids.detach().cpu().tolist())
+                    }
+                    motion_ids = torch.tensor(
+                        [global_to_local[int(pool["meta"][row]["motion_id"])] for row in meta_rows],
+                        dtype=torch.long, device=self.device,
+                    )
+                    start_times = torch.tensor(
+                        [float(pool["meta"][row]["t0"]) for row in meta_rows],
+                        dtype=torch.float32, device=self.device,
+                    ) + chosen_offsets.float() * self.dt
+                    self.motion_ids[aligned_envs] = motion_ids
+                    self.motion_len[aligned_envs] = self._motion_lib.get_motion_length(motion_ids)
+                    self.motion_start_times[aligned_envs] = start_times
+                    self._bfm_ref_pool_rows[aligned_envs] = chosen_rows
+                    self._bfm_ref_pool_offsets[aligned_envs] = chosen_offsets
+                    self._bfm_ref_aligned_mask[aligned_envs] = True
+
+            unresolved = force_dynamic.clone()
+            accepted_activity = torch.zeros(len(env_ids), device=self.device)
+            for _ in range(max_tries):
+                if not unresolved.any():
+                    break
+                local = unresolved.nonzero(as_tuple=False).flatten()
+                chosen_envs = env_ids[local.to(env_ids.device)]
+                # The first pass evaluates the already sampled frames.  Later
+                # passes replace only unresolved rows, avoiding biasing rows
+                # that have already met the activity gate.
+                if _ > 0 and not (
+                    _os.environ.get("BFM_REF_Z_ALIGNED", "0") == "1" and pool is not None
+                ):
+                    self.motion_ids[chosen_envs] = self._motion_lib.sample_motions(len(chosen_envs))
+                    self.motion_len[chosen_envs] = self._motion_lib.get_motion_length(self.motion_ids[chosen_envs])
+                    self.motion_start_times[chosen_envs] = self._motion_lib.sample_time(self.motion_ids[chosen_envs])
+                state = self._motion_lib.get_motion_state(
+                    self.motion_ids[chosen_envs], self.motion_start_times[chosen_envs]
+                )
+                activity = state["dof_vel"].norm(dim=-1)
+                accepted_activity[local] = activity
+                unresolved[local[activity >= activity_min]] = False
+                # Pool-aligned rows must not be independently resampled: doing
+                # so would invalidate the episode/offset used to construct z.
+                if _os.environ.get("BFM_REF_Z_ALIGNED", "0") == "1" and pool is not None:
+                    break
+
+            self.log_dict["ref_curriculum_dynamic_prob"] = torch.tensor(dynamic_prob, dtype=torch.float32)
+            self.log_dict["ref_curriculum_dynamic_fraction"] = (
+                force_dynamic & (accepted_activity >= activity_min)
+            ).float().mean().detach().cpu()
+            if force_dynamic.any():
+                self.log_dict["ref_curriculum_forced_activity"] = accepted_activity[force_dynamic].mean().detach().cpu()
             
         # self.motion_start_times[env_ids] = self._motion_lib.sample_time(self.motion_ids[env_ids])
         # offset = self.env_origins
@@ -382,9 +545,6 @@ class LeggedRobotMotions(LeggedRobotBase):
         self.extras["ref_body_rot_extend"] = self.ref_body_rot_extend.clone()
 
     def _log_motion_tracking_info(self):
-        # upper/lower_body_id are only populated when the robot config defines
-        # upper_body_link/lower_body_link (G1 does; BDX has no such split). Guard
-        # so a robot that omits them doesn't AttributeError here every step.
         vr_3point_diff = self.dif_global_body_pos[:, self.motion_tracking_id, :]
         joint_pos_diff = self.dif_joint_angles
 
@@ -393,12 +553,13 @@ class LeggedRobotMotions(LeggedRobotBase):
 
         self.log_dict["vr_3point_diff_norm"] = vr_3point_diff_norm
         self.log_dict["joint_pos_diff_norm"] = joint_pos_diff_norm
-        upper_body_id = getattr(self, "upper_body_id", None)
-        lower_body_id = getattr(self, "lower_body_id", None)
-        if upper_body_id is not None:
-            self.log_dict["upper_body_diff_norm"] = self.dif_global_body_pos[:, upper_body_id, :].norm(dim=-1).mean()
-        if lower_body_id is not None:
-            self.log_dict["lower_body_diff_norm"] = self.dif_global_body_pos[:, lower_body_id, :].norm(dim=-1).mean()
+        # upper/lower body split is G1-specific (upper/lower_body_link); robots without
+        # those links (e.g. BDX: has_upper_body_dof=False) skip the two extra metrics
+        if hasattr(self, "upper_body_id") and hasattr(self, "lower_body_id"):
+            upper_body_diff = self.dif_global_body_pos[:, self.upper_body_id, :]
+            lower_body_diff = self.dif_global_body_pos[:, self.lower_body_id, :]
+            self.log_dict["upper_body_diff_norm"] = upper_body_diff.norm(dim=-1).mean()
+            self.log_dict["lower_body_diff_norm"] = lower_body_diff.norm(dim=-1).mean()
     
     def _draw_debug_vis(self):
         if self.config.simulator.config.name in ('mujoco', 'mujoco_warp'):
@@ -583,12 +744,15 @@ class LeggedRobotMotions(LeggedRobotBase):
         return res
     
     def _reward_penalty_ankle_roll(self):
-        # Penalty for the ankle-roll DOF on G1 (ankle = [pitch, roll]). BDX has a
-        # single ankle DOF per leg, so [1:2] is an empty slice → silent no-op.
-        # Guard so a robot with <2 ankle DOFs gets a clean zero instead of a
-        # degenerate reward; the BDX reward config should simply omit this name.
-        if len(self.left_ankle_dof_indices) < 2 and len(self.right_ankle_dof_indices) < 2:
-            return torch.zeros(self.num_envs, device=self.device)
+        # Compute the penalty for ankle roll.
+        # [BDX-NOTE] BDX has a single ankle DOF per foot (no roll/pitch split),
+        # so indices[1:2] is an empty slice and this penalty is identically 0.
+        # Kept structurally correct for G1-style feet; for single-DOF ankles the
+        # term is not applicable and its coefficient should stay 0 (external
+        # review ruling 2026-08-21 — do not silently remap it to the only DOF,
+        # that would change reward semantics).
+        if len(self.left_ankle_dof_indices) < 2 or len(self.right_ankle_dof_indices) < 2:
+            return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         left_ankle_roll = self.simulator.dof_pos[:, self.left_ankle_dof_indices[1:2]]
         right_ankle_roll = self.simulator.dof_pos[:, self.right_ankle_dof_indices[1:2]]
         return torch.sum(torch.square(left_ankle_roll) + torch.square(right_ankle_roll), dim=1)
@@ -596,12 +760,16 @@ class LeggedRobotMotions(LeggedRobotBase):
     def foot_contact_detect(self, positions, velocity):
         foot_vel = velocity[:, self.feet_indices]
         foot_height = positions[:, self.feet_indices, 2]
-        # G1-tuned defaults (ankle ~0.1m standing). Smaller robots (BDX ankle
-        # ~0.04m) need lower thresholds or contact obs misfires; expose both in
-        # the robot config under motion.foot_contact_{height,vel}_thres.
-        mocap = getattr(self.config.robot, "motion", None)
-        vel_thres = getattr(mocap, "foot_contact_vel_thres", 0.4) if mocap else 0.4
-        height_thres = getattr(mocap, "foot_contact_height_thres", 0.07) if mocap else 0.07
+        # config-driven (bdx yaml: 0.3/0.08 — VALIDATED against measured standing
+        # ankle height 0.0736 m; hardcoded 0.4/0.7 never fires on BDX and made
+        # contact obs ~all zeros in pre-2026-08-18 training). Regression test:
+        # tests/test_contact_detection.py
+        try:
+            motion_cfg = self.config.robot.motion
+            vel_thres = motion_cfg.get("foot_contact_vel_thres", 0.4)
+            height_thres = motion_cfg.get("foot_contact_height_thres", 0.07)
+        except AttributeError:
+            vel_thres, height_thres = 0.4, 0.07
         foot_speed = torch.norm(foot_vel, dim=-1)  # [num_envs, num_feet]
         contact_mask = (foot_speed < vel_thres) & (foot_height < height_thres)  # [num_envs, num_feet]
         return contact_mask

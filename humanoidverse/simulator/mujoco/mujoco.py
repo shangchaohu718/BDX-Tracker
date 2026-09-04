@@ -26,11 +26,16 @@ class MuJoCo(BaseSimulator):
         self.render_height=400
     
     def setup(self):
-        # Scene path is config-driven: robot.asset.scene_file (relative to data/robots/).
-        # Falls back to the G1 scene so existing G1 runs are byte-identical.
+        # Build the path to the MuJoCo model (MJCF/XML file)
+        self.model_path = os.path.join(
+            self.robot_cfg.asset.asset_root, 
+            self.robot_cfg.asset.xml_file
+        )
         hv_root = Path(__file__).parents[2]
+        # Scene file is config-driven via robot.asset.scene_file (e.g. bdx/scene_bdx_freebase_mujoco.xml);
+        # fall back to the G1 scene when the robot config does not specify one.
         scene_file = self.robot_cfg.asset.get("scene_file", None)
-        if scene_file is None:
+        if not scene_file:
             scene_file = "g1/scene_29dof_freebase_mujoco.xml"
         self.model_path = str(hv_root / "data/robots" / scene_file)
         self.freebase = True
@@ -40,6 +45,15 @@ class MuJoCo(BaseSimulator):
         self.sim_substeps = self.simulator_config.sim.substeps
         self.sim_dt = 1 / self.simulator_config.sim.fps  # MuJoCo timestep from the model options.
 
+        # [BDX-VEL-CLAMP-INF] joint velocity bound mirroring the training side
+        import yaml as _yaml, pathlib as _pl
+        _rc = _yaml.safe_load(_pl.Path(__file__).parents[2].joinpath("config/robot/bdx/bdx_14dof.yaml").read_text())["robot"]
+        _vl = _rc.get("dof_vel_limit_list")
+        if _vl is not None:
+            _cap = float(__import__("os").environ.get("BDX_VEL_CAP", "20.0"))
+            self._dof_vel_bound = np.array([min(v, _cap) for v in _vl])
+        else:
+            self._dof_vel_bound = None
         self.default_dof_frictionloss = self.model.dof_frictionloss.copy()
         self.default_body_mass = self.model.body_mass.copy()
         self.default_geom_friction = self.model.geom_friction.copy()
@@ -100,9 +114,14 @@ class MuJoCo(BaseSimulator):
 
             # TODO: dynamic friction?
 
-        if self.domain_rand_config.get("randomize_base_com", False) and self.robot_cfg.has_torso:
-            # get id of torso
-            self.torso_id = self.model.body(self.robot_cfg.torso_name).id
+        if self.domain_rand_config.get("randomize_base_com", False):
+            # robot-config driven trunk body (G1: torso_link, BDX: base_link)
+            motion_cfg = self.robot_cfg.get("motion", {})
+            base_name = motion_cfg.get("pelvis_link", None) or motion_cfg.get("base_link", None) or "torso_link"
+            valid = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(1, self.model.nbody)]
+            if base_name not in valid:
+                base_name = valid[0]
+            self.torso_id = self.model.body(base_name).id
             assert self.torso_id > -1
             x_uniform_range = self.domain_rand_config["base_com_range"]["x"]
             assert self.domain_rand_config["base_com_range"]["y"] == x_uniform_range
@@ -177,18 +196,20 @@ class MuJoCo(BaseSimulator):
 
         self.body_id = np.arange(self.num_bodies, dtype=np.int32) + 1
 
-        # If the loaded model has more bodies than the robot config expects, prune the
-        # extras (e.g. G1's fakehand/wrist bodies). Generalized from the old `"23"`/`"29"`
-        # path-string checks so any robot works. The asserts below still catch a true mismatch.
-        expected_bodies = list(self.robot_cfg.body_names)
-        if self.num_bodies > len(expected_bodies):
+        if "23" in self.model_path:
             for b in range(self.model.nbody):
-                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b)
-                if name and name not in expected_bodies and name in self.body_names:
-                    self.body_names.remove(name)
+                if "wrist" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b) or "hand" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b):
+                    self.body_names.remove(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b))
                     self.num_bodies -= 1
                     self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
 
+        if "29" in self.model_path:
+            for b in range(self.model.nbody):
+                if "hand" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b):
+                    self.body_names.remove(mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, b))
+                    self.num_bodies -= 1
+                    self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
+        
         # Validate configuration consistency.
         assert self.num_dof == len(self.robot_cfg.dof_names), "Number of DOFs must match the config."
         assert self.num_bodies == len(self.robot_cfg.body_names), "Number of bodies must match the config."
@@ -219,6 +240,15 @@ class MuJoCo(BaseSimulator):
         # In MuJoCo, forward simulation updates the state.
         mujoco.mj_forward(self.model, self.data)
         mujoco.mj_step(self.model, self.data)
+        # [BDX-VEL-CLAMP-INF] mirror the training-side velocity clamp (mujoco_warp clamps
+        # joint |qvel| at min(dof_vel_limit_list, BDX_VEL_CAP); training physics == inference
+        # physics). Gated by BFM_ZERO_DOF_VEL_CLAMP, same as the training side.
+        import os as _os
+        if _os.environ.get("BFM_ZERO_DOF_VEL_CLAMP", "1") != "0" and getattr(self, "_dof_vel_bound", None) is not None:
+            _nv = len(self._dof_vel_bound)
+            self.data.qvel[6:6 + _nv] = np.clip(
+                self.data.qvel[6:6 + _nv], -self._dof_vel_bound, self._dof_vel_bound
+            )
         # import ipdb; ipdb.set_trace()
         self.refresh_sim_tensors()
     
@@ -229,10 +259,10 @@ class MuJoCo(BaseSimulator):
         # Convert torch tensor to numpy if needed.
         if isinstance(torques, torch.Tensor):
             torques = torques.cpu().numpy()
-        if self.freebase:
-            self.data.ctrl[6:] = torques
-        else:   
-            self.data.ctrl[:] = torques
+        # actuator offset: G1's scene carries 6 extra free-base actuators (nu=6+ndof);
+        # BDX's motors map 1:1 onto the hinges (nu=ndof) -> offset 0
+        off = self.model.nu - torques.shape[-1]
+        self.data.ctrl[off:] = torques
         # mujoco.mj_step(self.model, self.data)
     
     def set_actor_root_state_tensor(self, set_env_ids, root_states):
@@ -290,8 +320,9 @@ class MuJoCo(BaseSimulator):
         # Velocity limits (using model.dof_damping for approximation or another method)
         dof_props["velocity"] = torch.tensor([model.dof_damping[6:][i] for i in range(self.num_dof)])
 
-        # Torque limits (from actuator control range)
-        dof_props["effort"] = torch.tensor([model.actuator_ctrlrange[6:][i, 1] for i in range(self.num_dof)])
+        # Torque limits (from actuator control range; same actuator offset as apply_torques_at_dof)
+        _off = model.nu - self.num_dof
+        dof_props["effort"] = torch.tensor([model.actuator_ctrlrange[_off:][i, 1] for i in range(self.num_dof)])
 
         return dof_props
 

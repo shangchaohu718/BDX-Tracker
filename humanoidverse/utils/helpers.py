@@ -195,7 +195,9 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
 
     if env.config.obs.use_obs_filter:
         base_quat = ref_body_rots[:, 0]  # root orientation
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        ref_ang_vel = quat_rotate_inverse(
+            base_quat, ref_body_angular_vels[:, 0], w_last=True
+        )
         projected_gravity = quat_rotate_inverse(
             base_quat,
             env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1),
@@ -237,29 +239,11 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
         return max_local_self_obs, ref_dict
 
 
-def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, example_obs_dict, z_dim, history: bool = False, use_29dof: bool = True, dof: int | None = None):
-    """Export the actor policy to ONNX. The state-obs pose slice layout is
-    ``[dof_pos, dof_vel, projected_gravity(3), base_ang_vel(3)]`` so
-    ``state_end = 2*dof + 6`` and ``action_end = state_end + dof``.
-
-    Pass ``dof=<action_dim>`` to generalize beyond G1 (e.g. BDX dof=14 ->
-    state_end=34, action_end=48). When ``dof`` is None the legacy
-    ``use_29dof`` boolean selects G1-29 (64/+29) or the 23-DOF variant (52/+23).
-    """
+def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, example_obs_dict, z_dim, history: bool = False, use_29dof: bool = True):
     os.makedirs(path, exist_ok=True)
     path = os.path.join(path, exported_policy_name)
     inference_model = inference_model.eval()
     actor = copy.deepcopy(inference_model).to("cpu")
-
-    if dof is not None:
-        state_end = 2 * dof + 6
-        action_end = state_end + dof
-    elif use_29dof:
-        state_end = 64
-        action_end = state_end + 29
-    else:
-        state_end = 52
-        action_end = state_end + 23
 
     class PPOWrapper(nn.Module):
         def __init__(self, actor, history):
@@ -276,6 +260,12 @@ def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, exam
             Dynamically creates a dictionary from the input keys and args.
             """
             actor_obs, ctx = actor_obs[:, :-z_dim], actor_obs[:, -z_dim:]
+            if use_29dof:
+                state_end = 64
+                action_end = state_end+29
+            else:
+                state_end = 52
+                action_end = state_end+23
             state = actor_obs[:, :state_end]
             last_action = actor_obs[:, state_end:(action_end)]
             actor_dict = {
@@ -297,6 +287,4 @@ def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, exam
         input_names=["actor_obs"],  # Specify the input names
         output_names=["action"],  # Name the output
         opset_version=13,  # Specify the opset version, if needed
-        # allow any batch size at inference (the example traces with batch=1)
-        dynamic_axes={"actor_obs": {0: "batch"}, "action": {0: "batch"}},
     )

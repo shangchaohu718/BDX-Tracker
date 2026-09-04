@@ -3,6 +3,8 @@ import typing
 from collections.abc import Mapping
 from typing import Dict, List, Tuple, Union
 
+import os
+
 import numpy as np
 import torch
 from tensordict import TensorDict
@@ -96,7 +98,7 @@ class TrajectoryDictBuffer:
         )
         # set priorities to match the number of trajectories
         self.priorities = torch.ones(len(self.lengths), device=self.device, dtype=torch.float32) / len(self.lengths)
-        self._get_idxs = torch.compile(get_idxs, mode="reduce-overhead")
+        self._get_idxs = get_idxs if os.environ.get("BFM_DISABLE_TORCH_COMPILE", "0") == "1" else torch.compile(get_idxs, mode="reduce-overhead")
 
     def sample(self, batch_size: int = 1, seq_length: int | None = None):
         seq_length = seq_length or self.seq_length
@@ -163,7 +165,7 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
         self._idx = 0
         self._is_full = False
         self._recompute_start_stop = True
-        self._get_idxs = torch.compile(get_idxs, mode="reduce-overhead", fullgraph=True)
+        self._get_idxs = get_idxs if os.environ.get("BFM_DISABLE_TORCH_COMPILE", "0") == "1" else torch.compile(get_idxs, mode="reduce-overhead", fullgraph=True)
         assert self.n_dim == 1 or self.n_dim == 2, "n_dim must be either 1 or 2 for TrajectoryDictBufferMultiDim"
 
     def _ndim(self) -> int:

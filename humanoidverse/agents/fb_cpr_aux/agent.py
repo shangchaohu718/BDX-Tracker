@@ -8,6 +8,8 @@ from typing import Dict
 
 import pydantic
 import torch
+
+from humanoidverse.utils.bdx_state import bdx_motion_activity
 import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils._pytree import tree_map
@@ -22,6 +24,17 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     lr_aux_critic: float = 1e-4
     reg_coeff_aux: float = 1.0
     aux_critic_pessimism_penalty: float = 0.5
+    # Causal-ablation knob for the actor's FB term only (1.0 = unchanged
+    # baseline objective). F/B/critic still train normally at 0.0.
+    actor_fb_coeff: float = 1.0
+    # Distribution stats of the training (clipped) imitation reward.
+    diag_reward_stats: bool = False
+    # Motion-activity proxies (is the robot actually moving?): mean |action|
+    # (raw) and mean |dof_vel| (from the normalized state block).
+    diag_motion_activity: bool = False
+    # Expensive, observe-only diagnostics for short causal ablations.
+    diag_reward_sources: bool = False
+    diag_actor_update_ratio: bool = False
 
 
 class FBcprAuxAgentConfig(BaseConfig):
@@ -147,6 +160,7 @@ class FBcprAuxAgent(FBcprAgent):
         torch.compiler.cudagraph_mark_step_begin()
         expert_z = self.encode_expert(next_obs=expert_next_obs)
         train_z = train_batch["z"].to(self.device)
+        rollout_z = train_z
 
         # train the discriminator
         grad_penalty = self.cfg.train.grad_penalty_discriminator if self.cfg.train.grad_penalty_discriminator > 0 else None
@@ -154,9 +168,16 @@ class FBcprAuxAgent(FBcprAgent):
             expert_obs=expert_obs,
             expert_z=expert_z,
             train_obs=train_obs,
+            train_next_obs=train_next_obs,
             train_z=train_z,
             grad_penalty=grad_penalty,
         )
+        if self.cfg.train.diag_motion_activity:
+            # state layout: [base_ang_vel(3), projected_gravity(3), dof_pos(14), dof_vel(14)]
+            metrics.update({
+                "diag/mean_abs_action": train_action.detach().abs().mean(),
+                "diag/mean_abs_dof_vel_norm": bdx_motion_activity(train_obs["state"]).detach().abs().mean(),
+            })
 
         z = self.sample_mixed_z(train_goal=train_next_obs, expert_encodings=expert_z).clone()
         self.z_buffer.add(z)
@@ -164,6 +185,38 @@ class FBcprAuxAgent(FBcprAgent):
         if self.cfg.train.relabel_ratio is not None:
             mask = torch.rand((self.cfg.train.batch_size, 1), device=self.device) <= self.cfg.train.relabel_ratio
             train_z = torch.where(mask, z, train_z)
+
+        if self.cfg.train.diag_reward_sources:
+            # Limit diagnostics to a fixed prefix so four extra D forwards do
+            # not dominate short-training throughput.
+            m = min(256, self.cfg.train.batch_size)
+            with torch.no_grad():
+                diag_obs = tree_map(lambda x: x[:m], train_obs)
+                diag_next_obs = tree_map(lambda x: x[:m], train_next_obs)
+                policy_goal_z = self._model.project_z(self._model._backward_map(diag_next_obs))
+                # Preserve the training RNG stream: enabling diagnostics must
+                # not alter later minibatches, actor noise, or relabel masks.
+                if torch.device(self.device).type == "cuda":
+                    rng_state = torch.cuda.get_rng_state(self.device)
+                    random_z = self._model.sample_z(m, device=self.device)
+                    torch.cuda.set_rng_state(rng_state, self.device)
+                else:
+                    rng_state = torch.get_rng_state()
+                    random_z = self._model.sample_z(m, device=self.device)
+                    torch.set_rng_state(rng_state)
+                metrics.update(
+                    {
+                        "diag/reward_rollout_z": self._model._discriminator.compute_reward(diag_obs, rollout_z[:m]).mean(),
+                        "diag/reward_used_z": self._model._discriminator.compute_reward(diag_obs, train_z[:m]).mean(),
+                        "diag/reward_policy_goal_z": self._model._discriminator.compute_reward(diag_obs, policy_goal_z).mean(),
+                        "diag/reward_expert_z": self._model._discriminator.compute_reward(diag_obs, expert_z[:m]).mean(),
+                        "diag/reward_random_z": self._model._discriminator.compute_reward(diag_obs, random_z).mean(),
+                        "diag/cos_used_rollout_z": torch.nn.functional.cosine_similarity(
+                            train_z, rollout_z, dim=-1
+                        ).mean(),
+                        "diag/relabel_fraction": (train_z != rollout_z).any(dim=-1).float().mean(),
+                    }
+                )
 
         q_loss_coef = self.cfg.train.q_loss_coef if self.cfg.train.q_loss_coef > 0 else None
         clip_grad_norm = self.cfg.train.clip_grad_norm if self.cfg.train.clip_grad_norm > 0 else None
@@ -313,12 +366,18 @@ class FBcprAuxAgent(FBcprAgent):
             Qs_fb = (Fs * z).sum(-1)  # num_parallel x batch
             _, _, Q_fb = self.get_targets_uncertainty(Qs_fb, self.cfg.train.actor_pessimism_penalty)  # batch
 
-            weight = Q_fb.abs().mean().detach() if self.cfg.train.scale_reg else 1.0
-            actor_loss = (
-                -Q_discriminator.mean() * self.cfg.train.reg_coeff * weight
-                - Q_aux.mean() * self.cfg.train.reg_coeff_aux * weight
-                - Q_fb.mean()
+            # Metrics are reduced by the trainer as tensors.  Keep the disabled
+            # ablation on-device too, instead of leaking a Python float into the
+            # metrics dictionary.
+            weight = (
+                Q_fb.abs().mean().detach()
+                if self.cfg.train.scale_reg
+                else Q_fb.new_ones(())
             )
+            actor_loss_disc = -Q_discriminator.mean() * self.cfg.train.reg_coeff * weight
+            actor_loss_aux = -Q_aux.mean() * self.cfg.train.reg_coeff_aux * weight
+            actor_loss_fb = -self.cfg.train.actor_fb_coeff * Q_fb.mean()
+            actor_loss = actor_loss_disc + actor_loss_aux + actor_loss_fb
 
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -326,11 +385,45 @@ class FBcprAuxAgent(FBcprAgent):
         actor_grad_norm = grad_norm(self._model._actor.parameters()).detach()  # [BFM-DIAG-NAN] added by Claude
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
+        actor_grad_norm_post_clip = grad_norm(self._model._actor.parameters()).detach()
+        if self.cfg.train.diag_actor_update_ratio:
+            actor_params_before = [p.detach().clone() for p in self._model._actor.parameters()]
+            actor_param_norm = torch.sqrt(
+                sum((p.detach().float() ** 2).sum() for p in self._model._actor.parameters())
+            )
+            with torch.no_grad():
+                mean_action_before = self._model._actor(obs, z, self._model.cfg.actor_std).mean
+                mean_Qs_fb_before = (
+                    self._model._forward_map(obs, z, mean_action_before) * z
+                ).sum(-1)
+                _, _, mean_Q_fb_before = self.get_targets_uncertainty(
+                    mean_Qs_fb_before, self.cfg.train.actor_pessimism_penalty
+                )
         self.actor_optimizer.step()
+        if self.cfg.train.diag_actor_update_ratio:
+            actor_delta_norm = torch.sqrt(
+                sum(
+                    ((p.detach().float() - old.float()) ** 2).sum()
+                    for p, old in zip(self._model._actor.parameters(), actor_params_before)
+                )
+            )
+            actor_update_ratio = actor_delta_norm / actor_param_norm.clamp_min(1e-12)
+            with torch.no_grad():
+                mean_action_after = self._model._actor(obs, z, self._model.cfg.actor_std).mean
+                mean_Qs_fb_after = (
+                    self._model._forward_map(obs, z, mean_action_after) * z
+                ).sum(-1)
+                _, _, mean_Q_fb_after = self.get_targets_uncertainty(
+                    mean_Qs_fb_after, self.cfg.train.actor_pessimism_penalty
+                )
+                actor_mean_action_delta = (mean_action_after - mean_action_before).abs().mean()
 
         with torch.no_grad():
             output_metrics = {
                 "actor_loss": actor_loss.detach(),
+                "actor_loss_disc_component": actor_loss_disc.detach(),
+                "actor_loss_aux_component": actor_loss_aux.detach(),
+                "actor_loss_fb_component": actor_loss_fb.detach(),
                 "Q_discriminator": Q_discriminator.mean().detach(),
                 "Q_aux": Q_aux.mean().detach(),
                 "Q_fb": Q_fb.mean().detach(),
@@ -338,6 +431,36 @@ class FBcprAuxAgent(FBcprAgent):
                 "scale_reg_weight": weight,
                 "Q_fb_abs": Q_fb.abs().mean().detach(),
                 "actor_grad_norm": actor_grad_norm,
+                "actor_grad_norm_post_clip": actor_grad_norm_post_clip,
+                "effective_disc_coeff": self.cfg.train.reg_coeff * weight,
                 "actor_ok": torch.isfinite(actor_loss).float(),
             }
+            if self.cfg.train.diag_actor_update_ratio:
+                m = min(256, Q_fb.shape[0])
+                diag_obs = tree_map(lambda x: x[:m], obs)
+                diag_reward = self._model._discriminator.compute_reward(diag_obs, z[:m]).flatten()
+                diag_q_fb = Q_fb[:m].flatten()
+                q_centered = diag_q_fb - diag_q_fb.mean()
+                r_centered = diag_reward - diag_reward.mean()
+                qfb_reward_corr = (q_centered * r_centered).mean() / (
+                    q_centered.square().mean().sqrt()
+                    * r_centered.square().mean().sqrt()
+                    + 1e-8
+                )
+                q10, q90 = torch.quantile(diag_q_fb, torch.tensor([0.1, 0.9], device=diag_q_fb.device))
+                reward_at_qfb_bottom10 = diag_reward[diag_q_fb <= q10].mean()
+                reward_at_qfb_top10 = diag_reward[diag_q_fb >= q90].mean()
+                output_metrics["actor_param_update_ratio"] = actor_update_ratio.detach()
+                output_metrics["diag/Q_fb_actor_mean_before"] = mean_Q_fb_before.mean().detach()
+                output_metrics["diag/Q_fb_actor_mean_after"] = mean_Q_fb_after.mean().detach()
+                output_metrics["diag/Q_fb_actor_mean_delta"] = (
+                    mean_Q_fb_after.mean() - mean_Q_fb_before.mean()
+                ).detach()
+                output_metrics["diag/actor_mean_action_delta"] = actor_mean_action_delta.detach()
+                output_metrics["diag/Q_fb_reward_corr"] = qfb_reward_corr.detach()
+                output_metrics["diag/reward_at_Q_fb_bottom10"] = reward_at_qfb_bottom10.detach()
+                output_metrics["diag/reward_at_Q_fb_top10"] = reward_at_qfb_top10.detach()
+                output_metrics["diag/reward_Q_fb_top_minus_bottom10"] = (
+                    reward_at_qfb_top10 - reward_at_qfb_bottom10
+                ).detach()
         return output_metrics

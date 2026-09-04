@@ -353,7 +353,9 @@ class FBAgent:
     
     def _sample_tracking_z(self, replay_buffer, batch_dim, traj_length):
         batch = replay_buffer["expert_slicer"].sample(batch_dim * traj_length, seq_length=traj_length)  # N*T x obs_dim
-        z = self._model.backward_map(batch["next"]["observation"])  # NT x z_dim
+        # the buffer may live on cpu (buffer_device="cpu"); the model + its BatchNorm
+        # running stats live on the model device -> move before backward_map
+        z = self._model.backward_map(tree_map(lambda x: x.to(self._model.device), batch["next"]["observation"]))  # NT x z_dim
         z = z.view(batch_dim, traj_length, z.shape[-1])  # N x T x z_dim
         for step in range(traj_length):
             end_idx = min(step + self.cfg.model.seq_length, traj_length)

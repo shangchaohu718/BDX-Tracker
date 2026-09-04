@@ -36,7 +36,14 @@ HYDRA_CONFIG_DIR = os.path.join(HUMANOIDVERSE_DIR, "config")
 HYDRA_CONFIG_REL_PATH = os.path.join("exp", "bfm_zero", "bfm_zero")
 
 
-def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_history_noaction: bool = False):
+def load_expert_trajectories_from_motion_lib(
+    env,
+    agent_cfg,
+    device="cpu",
+    add_history_noaction: bool = False,
+    *,
+    base_ang_vel_frame: str = "body",
+):
     """
     Load expert trajectories from motion library.
     """
@@ -73,7 +80,19 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         base_quat = ref_body_rots[:, 0]
         ref_dof_pos = motion_res["dof_pos"] - env.default_dof_pos[0]
         ref_dof_vel = motion_res["dof_vel"]
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        if base_ang_vel_frame == "body":
+            # Policy proprioception exposes root angular velocity in the root
+            # frame. Motion-library angular velocities are world-frame.
+            ref_ang_vel = quat_rotate_inverse(
+                base_quat, ref_body_angular_vels[:, 0], w_last=True
+            )
+        elif base_ang_vel_frame == "world":
+            # Diagnostic-only legacy path used by the controlled D ablation.
+            ref_ang_vel = ref_body_angular_vels[:, 0]
+        else:
+            raise ValueError(
+                f"base_ang_vel_frame must be 'body' or 'world', got {base_ang_vel_frame!r}"
+            )
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
         # NOTE we multiply by zero to align with mujoco data
         bogus_actions = ref_dof_pos * 0  # bogus actions

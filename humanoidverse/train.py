@@ -329,8 +329,30 @@ class Workspace:
         sys.exit(0)
 
     def train_online(self) -> None:
+        expert_pool_payload = None
         if self.training_with_expert_data:
-            if self.cfg.load_isaac_expert_data:
+            # [BFM-DOMAIN-FIX] optional expert-sim pool: expert positives for the
+            # discriminator generated through the simulator observation pipeline
+            # (state injection) instead of the kinematic motion-library pipeline.
+            # Root cause context: BFM_ZERO_DEBUG_HANDOFF — discriminator
+            # domain-separation. Unset -> unchanged kinematic expert data.
+            pool_path = os.environ.get("BFM_EXPERT_SIM_POOL")
+            if pool_path:
+                from humanoidverse.agents.buffers.trajectory import TrajectoryDictBuffer
+
+                payload = torch.load(pool_path, map_location=self.cfg.buffer_device)
+                expert_pool_payload = payload
+                expert_buffer = TrajectoryDictBuffer(
+                    episodes=payload["episodes"],
+                    seq_length=self.agent.cfg.model.seq_length,
+                    device=self.cfg.buffer_device,
+                )
+                print(
+                    f"[BFM-EXPERT-SIM-POOL] loaded {len(expert_buffer)} frames / "
+                    f"{len(payload['episodes'])} episodes from {pool_path}",
+                    flush=True,
+                )
+            elif self.cfg.load_isaac_expert_data:
                 expert_buffer = load_expert_trajectories_from_motion_lib(self.train_env._env, self.cfg.agent, device=self.cfg.buffer_device)
             else:
                 print("Loading expert trajectories")
@@ -350,6 +372,23 @@ class Workspace:
             train_env_info = self.train_env_info
         else:
             train_env, train_env_info = self.cfg.env.build(num_envs=self.cfg.online_parallel_envs)
+
+        # [BFM-REF-Z-ALIGN] The environment already starts each episode from a
+        # motion-library state.  Reference-state exploration is only
+        # conditionally meaningful when the rollout latent describes that same
+        # motion window.  Share the already-loaded pool (no second 471 MB load)
+        # with the reset sampler; it records the selected episode/offset so the
+        # rollout context can be encoded from the identical window below.
+        if (
+            expert_pool_payload is not None
+            and os.environ.get("BFM_REF_Z_ALIGNED", "0") == "1"
+            and hasattr(train_env, "_env")
+        ):
+            train_env._env._bfm_ref_pool_payload = expert_pool_payload
+            print(
+                "[BFM-REF-Z-ALIGN] reference reset state and rollout z use the same expert-sim pool window",
+                flush=True,
+            )
 
         print("Allocating buffers")
         replay_buffer = {}
@@ -380,6 +419,15 @@ class Workspace:
                 replay_buffer["train"] = DictBuffer(capacity=self.cfg.buffer_size, device=self.cfg.buffer_device)
         if self.training_with_expert_data:
             replay_buffer["expert_slicer"] = expert_buffer
+
+        # [BFM-COND-FIX] optional fresh-D conditional pretraining bootstrap:
+        # load only the discriminator weights (actor/critic/F/B stay fresh).
+        pretrained_d = os.environ.get("BDX_PRETRAINED_D")
+        if pretrained_d:
+            payload_d = torch.load(pretrained_d, map_location="cuda")
+            self.agent._model._discriminator.load_state_dict(payload_d["discriminator"])
+            print(f"[BFM-PRETRAINED-D] loaded discriminator from {pretrained_d} "
+                  f"(stats: {payload_d.get('stats', {}).get('final_margin')})", flush=True)
 
         print("Starting training")
         progb = tqdm(total=self.cfg.num_env_steps, disable=self.cfg.disable_tqdm)
@@ -496,7 +544,47 @@ class Workspace:
                             :, -1
                         ].clone()
 
+                previous_context = context
                 context = self.agent.maybe_update_rollout_context(z=context, step_count=step_count, replay_buffer=replay_buffer)
+                # Reset rows selected by the reference curriculum carry an
+                # episode/offset chosen by LeggedRobotMotions.  Encode exactly
+                # that 8-frame pool window, overriding the independently sampled
+                # rollout z only for those rows.  This removes the previous
+                # (state_from_motion_A, z_from_motion_B) reset mismatch.
+                inner_env = getattr(train_env, "_env", None)
+                aligned_mask = getattr(inner_env, "_bfm_ref_aligned_mask", None)
+                pool_rows = getattr(inner_env, "_bfm_ref_pool_rows", None)
+                pool_offsets = getattr(inner_env, "_bfm_ref_pool_offsets", None)
+                reset_mask = step_count.reshape(-1) == 0
+                if aligned_mask is not None and pool_rows is not None and pool_offsets is not None:
+                    use_mask = reset_mask & aligned_mask.to(reset_mask.device)
+                    # A reference-aligned episode represents one conditional
+                    # task.  Do not let update_z_every_step silently replace
+                    # that task every 100 steps; hold z until the next reset.
+                    # This was the remaining long-horizon mismatch: at horizon
+                    # 500, reset alignment survived only the first 100 steps.
+                    keep_mask = (~reset_mask) & aligned_mask.to(reset_mask.device)
+                    if previous_context is not None and keep_mask.any():
+                        context[keep_mask] = previous_context.to(context.device)[keep_mask]
+                    use_ids = use_mask.nonzero(as_tuple=False).flatten()
+                    if use_ids.numel() > 0:
+                        seq = self.agent.cfg.model.seq_length
+                        windows = []
+                        for env_i in use_ids.detach().cpu().tolist():
+                            ep_i = int(pool_rows[env_i].item())
+                            off_i = int(pool_offsets[env_i].item())
+                            ep_obs = expert_pool_payload["episodes"][ep_i]["observation"]
+                            windows.append({
+                                key: value[off_i : off_i + seq]
+                                for key, value in ep_obs.items()
+                            })
+                        stacked = {
+                            key: torch.cat([window[key] for window in windows], dim=0).to(self.agent.device)
+                            for key in windows[0]
+                        }
+                        encoded = self.agent._model.backward_map(stacked)
+                        encoded = encoded.view(len(windows), seq, -1).mean(dim=1)
+                        context[use_ids] = self.agent._model.project_z(encoded)
                 if t < self.cfg.num_seed_steps:
                     action = train_env.action_space.sample().astype(np.float32)
                 else:
@@ -649,17 +737,6 @@ class Workspace:
             truncated = new_truncated
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
-
-        # [BFM-OPS-FIX] Final save on loop exit. The scheduled save() inside the loop only fires
-        # when (t - last_checkpoint) >= checkpoint_every_steps; a run that exits within a checkpoint
-        # interval (e.g. resuming at 382.99M with target 384M and checkpoint_every=2M, or any
-        # clean exit before the next 2M boundary) would otherwise lose ALL progress since the last
-        # checkpoint and leave train_status.json frozen -> the supervisor sees +0 and loops forever
-        # on a run that is actually completing. Save the final step unconditionally so progress is
-        # always recorded. `t` is the last loop value (final env step reached).
-        if t > self._checkpoint_time:
-            self.save(t, replay_buffer)
-            self._checkpoint_time = t
         train_env.close()
 
     def eval(self, t, replay_buffer):
@@ -714,6 +791,30 @@ class Workspace:
             replay_buffer["train"].save(self.work_dir / CHECKPOINT_DIR_NAME / "buffers" / "train")
         with (self.work_dir / CHECKPOINT_DIR_NAME / "train_status.json").open("w+") as f:
             json.dump({"time": time}, f, indent=4)
+        # [Gate1-OPS] non-rolling snapshot retention: copy the checkpoint to
+        # work_dir/ckpt_<time> so within-run time series (fixed-panel probes)
+        # survive the rolling overwrite. Env-gated, model+status only (no buffer).
+        # Saves land on step-grid offsets (e.g. 25088), so key on the snapshot
+        # INDEX (time // every) rather than exact divisibility.
+        snap_every = int(os.environ.get("BFM_SNAPSHOT_EVERY", "0"))
+        if snap_every > 0:
+            snap_idx = time // snap_every
+            # always advance the index (even if the copy already exists) so
+            # resume runs don't retry the same slot forever
+            should_snap = snap_idx > getattr(self, "_last_snap_idx", -1)
+            self._last_snap_idx = max(snap_idx, getattr(self, "_last_snap_idx", -1))
+            if should_snap:
+                import shutil
+                snap = self.work_dir / f"ckpt_{time}"
+                if not snap.exists():
+                    tmp = self.work_dir / f"ckpt_{time}.tmp"
+                    shutil.copytree(
+                        self.work_dir / CHECKPOINT_DIR_NAME, tmp,
+                        ignore=shutil.ignore_patterns("buffers"),
+                    )
+                    (tmp / "READY").write_text(str(time))
+                    tmp.rename(snap)  # atomic: probes only read ckpt_* dirs (completed)
+                    print(f"[Gate1-OPS] retained snapshot {snap}", flush=True)
 
 
 def train_bfm_zero(profile: str = "h20"):
@@ -731,53 +832,6 @@ def train_bfm_zero(profile: str = "h20"):
     from humanoidverse.agents.nn_models import ForwardArchiConfig, BackwardArchiConfig, ActorArchiConfig, DiscriminatorArchiConfig, RewardNormalizerConfig
     from humanoidverse.agents.normalizers import ObsNormalizerConfig, BatchNormNormalizerConfig
     from humanoidverse.agents.nn_filters import DictInputFilterConfig
-
-    # ------------------------------------------------------------------ #
-    #  Run intent: fresh | resume | snapshot. One concept, resolved ONCE, that
-    #  governs work_dir, whether eval/prioritization runs, and the default step
-    #  target -- replacing the prior ad-hoc BFM_ZERO_SNAPSHOT / BFM_ZERO_RESUME
-    #  boolean toggles that each mutated work_dir inline.
-    #
-    #  Selection (first match wins):
-    #    1. BFM_ZERO_RUN_MODE (explicit; preferred)
-    #    2. BFM_ZERO_SNAPSHOT=1  -> snapshot        (back-compat)
-    #       BFM_ZERO_RESUME=1    -> resume          (back-compat)
-    #    3. "fresh" (default)
-    #
-    #  diag_mode (snapshot | resume) skips evaluation AND prioritization (they
-    #  need a trained policy + a buffer of real rollouts). fresh runs both.
-    # ------------------------------------------------------------------ #
-    _RUN_MODE_DEFAULT_TARGET = {
-        "fresh":    384_000_000,   # paper scale (~7d on H20); extend only after eval
-        "resume":   750_000_000,   # extended target past paper scale
-        "snapshot": 384_000_000,   # exits during seeding; value is irrelevant
-    }
-
-    def _resolve_run_mode(profile_work_dir: str):
-        mode = os.environ.get("BFM_ZERO_RUN_MODE", "").strip().lower()
-        if mode not in _RUN_MODE_DEFAULT_TARGET:
-            if os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1":
-                mode = "snapshot"
-            elif os.environ.get("BFM_ZERO_RESUME", "0") == "1":
-                mode = "resume"
-            else:
-                mode = "fresh"
-        diag_mode = mode in ("snapshot", "resume")
-        # BFM_ZERO_WORK_DIR is an explicit override honored in ALL modes; otherwise each
-        # non-fresh mode gets a dedicated suffix so its checkpoint never collides with another's.
-        suffix = {"snapshot": "-snapshot", "resume": "-resume", "fresh": "-fresh"}[mode]
-        work_dir = os.environ.get(
-            "BFM_ZERO_WORK_DIR", profile_work_dir + suffix,
-        )
-        num_env_steps = int(os.environ.get(
-            "BFM_ZERO_NUM_ENV_STEPS", _RUN_MODE_DEFAULT_TARGET[mode],
-        ))
-        return mode, diag_mode, work_dir, num_env_steps
-
-    # NOTE: _resolve_run_mode() is defined here but CALLED below, after the platform profile `p`
-    # is selected (it needs p["work_dir"]). Run intent and platform profile are orthogonal axes:
-    # platform = which hardware (network width, env count, buffer, device); run-mode = what this
-    # run does (fresh/resume/snapshot -> work_dir, eval, target steps). They compose, so stay separate.
 
     # ------------------------------------------------------------------ #
     #  Per-network architecture + env/buffer scale for each profile.
@@ -816,53 +870,35 @@ def train_bfm_zero(profile: str = "h20"):
             "buffer_size": 1_024_000,
             "buffer_device": "cpu",   # 16 GB: keep replay buffer on host
         },
-        "bdx": {
-            # BDX (14 DOF / 17 bodies, ~3.5 min motion) — rtx5080-sized nets +
-            # h20 parallelism. z_dim 128 (not 256); b halved to match. Keep 8192
-            # envs (small robot collapses harder; NaN-reset tuning depends on it).
-            # See the BDX bring-up plan for the data-ratio rationale.
-            "f_dim": 512, "f_layers": 3,
-            "b_dim": 128, "b_layers": 1,
-            "actor_dim": 512, "actor_layers": 3,
-            "critic_dim": 512, "critic_layers": 3,
-            "disc_dim": 512, "disc_layers": 2,
-            "aux_dim": 512, "aux_layers": 3,
-            "z_dim": 128,             # default 256 when key absent; BDX shrinks to 128
-            "discount": 0.95,         # default 0.98; shorter-horizon for 3.2s-median clips
-            "work_dir": "results/bfmzero-bdx",
-            "batch_size": 4096,
-            "online_parallel_envs": 8192,
-            "eval_num_envs": 1024,
-            "buffer_size": 2_560_000,
-            "buffer_device": "cuda",
-        },
     }
     if profile not in PROFILES:
         raise ValueError(f"Unknown profile '{profile}'. Choose from {list(PROFILES)}")
     p = PROFILES[profile]
-    # Robot selection. Default G1 (untouched). BFM_ZERO_ROBOT=bdx selects the
-    # BDX robot config + BDX-native motion pkl + drops the G1-only ankle-roll
-    # aux reward (BDX's single-DOF ankle has no roll component).
-    _robot_choice = os.environ.get("BFM_ZERO_ROBOT", "g1").lower()
-    _is_bdx = (_robot_choice == "bdx")
-    if _is_bdx:
-        _robot_hydra = "robot=bdx/bdx_14dof"
-        _motion_pkl = "humanoidverse/data/bdx_14dof_clipped.pkl"
-    else:
-        _robot_hydra = "robot=g1/g1_29dof_hard_waist"
-        _motion_pkl = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
-    # Resolve run intent now that the platform profile `p` (and its work_dir) is known.
-    _run_mode, _diag_mode, _work_dir, _num_env_steps = _resolve_run_mode(p["work_dir"])
-    print(f"[BFM-OPS] run_mode={_run_mode} work_dir={_work_dir} num_env_steps={_num_env_steps} "
-          f"diag(eval/prio off)={_diag_mode}")
-    if _run_mode == "snapshot":
+    # [BFM-DIAG-SNAPSHOT] -- instrumentation added by Claude
+    # When BFM_ZERO_SNAPSHOT=1: skip eval/prioritization, run the random-action seed
+    # phase (num_seed_steps = 10*N_env), capture the random-rollout buffer + agent at
+    # the end of seeding, then exit -- so the first agent.update() can be debugged
+    # offline without re-running the simulator. Unset = normal training (unchanged).
+    _snapshot_mode = os.environ.get("BFM_ZERO_SNAPSHOT", "0") == "1"
+    if _snapshot_mode:
         print("[BFM-DIAG-SNAPSHOT] SNAPSHOT MODE: will capture the random-rollout buffer and exit before the first update.")
-    elif _run_mode == "resume":
+    # [BFM-DIAG-SNAPSHOT] RESUME MODE: continue training from a captured snapshot's buffer+agent
+    # (assembled into work_dir/checkpoint/ -- see the snapshot->checkpoint assembly below),
+    # WITHOUT re-running the slow seed phase and WITHOUT eval/prioritization. BFM_ZERO_SNAPSHOT
+    # is unset so the capture block never fires; training simply resumes and proceeds.
+    _resume_mode = os.environ.get("BFM_ZERO_RESUME", "0") == "1"
+    _diag_mode = _snapshot_mode or _resume_mode
+    if _resume_mode:
         print("[BFM-DIAG-SNAPSHOT] RESUME MODE: will load the snapshot checkpoint (buffer+agent) and continue training.")
-    _snapshot_mode = (_run_mode == "snapshot")
-    _resume_mode = (_run_mode == "resume")
+    # [BFM-DIAG-SNAPSHOT] use a dedicated work_dir so snapshot/resume runs are isolated from the
+    # main training dir. Override with BFM_ZERO_SNAPSHOT_DIR / BFM_ZERO_WORK_DIR respectively.
+    _work_dir = p["work_dir"]
+    if _snapshot_mode:
+        _work_dir = os.environ.get("BFM_ZERO_SNAPSHOT_DIR", _work_dir + "-snapshot")
+    elif _resume_mode:
+        _work_dir = os.environ.get("BFM_ZERO_WORK_DIR", _work_dir + "-resume")
 
-    # evaluations disabled in snapshot/resume mode (also disables prioritization)
+    # [BFM-DIAG-SNAPSHOT] evaluations disabled in snapshot/resume mode (also disables prioritization)
     _evaluations = [] if _diag_mode else [
         HumanoidVerseIsaacTrackingEvaluationConfig(
             name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos',
@@ -880,7 +916,7 @@ def train_bfm_zero(profile: str = "h20"):
                 device='cuda',
                 archi=FBcprAuxModelArchiConfig(
                     name='FBcprAuxModelArchiConfig',
-                    z_dim=p.get("z_dim", 256),
+                    z_dim=256,
                     norm_z=True,
                     f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=p["f_dim"], model='residual', hidden_layers=p["f_layers"], embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
                     b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=p["b_dim"], hidden_layers=p["b_layers"], norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
@@ -918,17 +954,9 @@ def train_bfm_zero(profile: str = "h20"):
                 fb_pessimism_penalty=0.0,
                 actor_pessimism_penalty=0.5,
                 stddev_clip=0.3,
-                q_loss_coef=0.1,   # [BFM-FIX 2026-07-07] PAPER VALUE. Was 0.0 (module default) which
-                                   # DISABLED the q_loss term — the paper's 2nd FB-loss component (eq
-                                   # app_method.tex:207) carrying the gamma current/target-step mix AND
-                                   # the Sigma_B Dirichlet/covariance normalization (B_inv_conv = solve(cov,B))
-                                   # that ties F's scale to B's covariance and keeps the backward-map
-                                   # gradient SMOOTH. Without it, only orth_loss_diag acts on |B| (pushing
-                                   # it UP unboundedly) -> Q_fb and fb_bwd_grad_norm explode -> NaN.
-                                   # Confirmed live: q_loss=0.0 fresh run hit fb_bwd peak 801k, Q_fb 940,
-                                   # NaN-reset 2.03% before being killed at step 5.08M.
+                q_loss_coef=0.0,
                 batch_size=p["batch_size"],
-                discount=p.get("discount", 0.98),
+                discount=0.98,
                 use_mix_rollout=True,
                 update_z_every_step=100,
                 z_buffer_size=8192,
@@ -949,10 +977,8 @@ def train_bfm_zero(profile: str = "h20"):
                 reg_coeff_aux=0.02,
                 aux_critic_pessimism_penalty=0.5
             ),
-            aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_slippage'] + ([] if _is_bdx else ['penalty_ankle_roll']),
-            aux_rewards_scaling={k: v for k, v in {
-                'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0,
-            }.items() if k in (['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_slippage'] + ([] if _is_bdx else ['penalty_ankle_roll']))},
+            aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_ankle_roll', 'penalty_slippage'],
+            aux_rewards_scaling={'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0},
             cudagraphs=False,
             compile=False
         ),
@@ -962,7 +988,7 @@ def train_bfm_zero(profile: str = "h20"):
             name='humanoidverse_isaac',
             device='cuda:0',
             # TODO this needs to be updated to point to a path with lafan dataset chunked into 10s clips
-            lafan_tail_path=_motion_pkl,
+            lafan_tail_path='humanoidverse/data/lafan_29dof_10s-clipped.pkl',
             enable_cameras=False,
             camera_render_save_dir='isaac_videos',
             max_episode_length_s=None,
@@ -973,10 +999,7 @@ def train_bfm_zero(profile: str = "h20"):
             # [BFM-DIAG-NAN] lie_down_init_prob is env-var overridable for the bad-init-state A/B
             # confirmation run: default 0.3 (baseline); set BFM_ZERO_LIE_DOWN_PROB=0.0 on the remote
             # to spawn all envs upright (no lying-down penetration) and see if the sim NaN vanishes.
-            # lie_down_init is G1-scale (spawns at z=0.5; BDX stands at 0.35). Disable
-            # for BDX so it doesn't float — the 0.5m spawn height is hardcoded in
-            # legged_robot_motions.py:477 and not yet robot-parameterized.
-            hydra_overrides=['simulator=mujoco_warp', _robot_hydra, 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0'] + ([] if _is_bdx else ['env.config.lie_down_init=True', f'env.config.lie_down_init_prob={os.environ.get("BFM_ZERO_LIE_DOWN_PROB", "0.3")}']),
+            hydra_overrides=['simulator=mujoco_warp', 'robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', f'env.config.lie_down_init_prob={os.environ.get("BFM_ZERO_LIE_DOWN_PROB", "0.3")}'],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,
@@ -989,9 +1012,7 @@ def train_bfm_zero(profile: str = "h20"):
         seed=4728,
         online_parallel_envs=p["online_parallel_envs"],
         log_every_updates=8192,
-        # target steps resolved by _resolve_run_mode(): fresh=384M (paper scale), resume=750M,
-        # overridable via BFM_ZERO_NUM_ENV_STEPS.
-        num_env_steps=_num_env_steps,
+        num_env_steps=384000000,
         update_agent_every=1024,
         num_seed_steps=p["online_parallel_envs"] * 10,  # [BFM-DIAG-SNAPSHOT] 10 random-action seed iterations, scaled with N_env
         num_agent_updates=16,

@@ -183,6 +183,7 @@ class DiscriminatorArchiConfig(BaseConfig):
     name: tp.Literal["DiscriminatorArchi"] = "DiscriminatorArchi"
     hidden_dim: int = 1024
     hidden_layers: int = 2
+    conditioning: tp.Literal["concat", "bilinear"] = "concat"
     input_filter: NNFilter = IdentityInputFilterConfig()
 
     def build(self, obs_space, z_dim) -> "Discriminator":
@@ -363,11 +364,28 @@ class Discriminator(nn.Module):
         )
         assert len(filtered_space.shape) == 1, "filtered_space must have a 1D shape"
         obs_dim = filtered_space.shape[0]
-        seq = [nn.Linear(obs_dim + z_dim, cfg.hidden_dim), nn.LayerNorm(cfg.hidden_dim), nn.Tanh()]
-        for _ in range(cfg.hidden_layers - 1):
-            seq += [nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.ReLU()]
-        seq += [nn.Linear(cfg.hidden_dim, 1)]
-        self.trunk = nn.Sequential(*seq)
+        if cfg.conditioning == "concat":
+            seq = [nn.Linear(obs_dim + z_dim, cfg.hidden_dim), nn.LayerNorm(cfg.hidden_dim), nn.Tanh()]
+            for _ in range(cfg.hidden_layers - 1):
+                seq += [nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.ReLU()]
+            seq += [nn.Linear(cfg.hidden_dim, 1)]
+            self.trunk = nn.Sequential(*seq)
+        elif cfg.conditioning == "bilinear":
+            # [BFM-STRICT-COND] No observation-only path: every contribution
+            # to the logit is an explicit state × latent interaction.  This
+            # removes the concat MLP's stable failure mode where dyn/stand z
+            # produce almost identical observation gradients after long RL.
+            def encoder(input_dim):
+                layers = [nn.Linear(input_dim, cfg.hidden_dim), nn.LayerNorm(cfg.hidden_dim), nn.Tanh()]
+                for _ in range(cfg.hidden_layers - 1):
+                    layers += [nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.ReLU()]
+                return nn.Sequential(*layers)
+            self.obs_encoder = encoder(obs_dim)
+            self.z_encoder = encoder(z_dim)
+            self.logit_scale = nn.Parameter(torch.tensor(1.0))
+            self.logit_bias = nn.Parameter(torch.tensor(0.0))
+        else:
+            raise ValueError(f"Unknown discriminator conditioning mode: {cfg.conditioning}")
 
     def forward(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor) -> torch.Tensor:
         s = self.compute_logits(obs, z)
@@ -375,9 +393,13 @@ class Discriminator(nn.Module):
 
     def compute_logits(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor) -> torch.Tensor:
         obs = self.input_filter(obs)
-        x = torch.cat([z, obs], dim=1)
-        logits = self.trunk(x)
-        return logits
+        if self.cfg.conditioning == "concat":
+            x = torch.cat([z, obs], dim=1)
+            return self.trunk(x)
+        obs_embedding = torch.nn.functional.normalize(self.obs_encoder(obs), dim=-1)
+        z_embedding = torch.nn.functional.normalize(self.z_encoder(z), dim=-1)
+        similarity = (obs_embedding * z_embedding).sum(dim=-1, keepdim=True)
+        return self.logit_scale.exp().clamp(max=20.0) * similarity + self.logit_bias
 
     def compute_reward(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
         s = self.forward(obs, z)

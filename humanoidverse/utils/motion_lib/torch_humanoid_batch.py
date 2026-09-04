@@ -68,6 +68,16 @@ class Humanoid_Batch:
         
         self._local_rotation = mjcf_data['local_rotation'][None, ].to(device)
         self.actuated_joints_idx = np.array([self.body_names.index(k) for k, v in mjcf_data['body_to_joint'].items()])
+        # per-actuated-joint hinge axis (aligned with actuated_joints_idx order), for dof_pos projection
+        _axis_by_joint = {}
+        for _j in tree.getroot().find("worldbody").findall('.//joint'):
+            if _j.attrib.get('type') == 'free' or 'axis' not in _j.attrib:
+                continue
+            _axis_by_joint[_j.attrib['name']] = [float(x) for x in _j.attrib['axis'].split()]
+        self._actuated_joint_axes = torch.tensor(
+            [_axis_by_joint.get(v, [0.0, 0.0, 1.0]) for k, v in mjcf_data['body_to_joint'].items()],
+            dtype=torch.float32,
+        )
         
         
         for m in motors:
@@ -148,6 +158,10 @@ class Humanoid_Batch:
                     if not joint.attrib.get("type") == "free":
                         joints_range.append([-np.pi, np.pi])
             for joint_node in xml_node.findall("joint"):
+                # free/floating joints are not actuated; skip them (G1 uses <freejoint>,
+                # BDX uses <joint type="free"> which this findall also matches)
+                if joint_node.attrib.get("type") == "free":
+                    continue
                 body_to_joint[node_name] = joint_node.attrib.get("name")
                 
             for next_node in xml_node.findall("body"):
@@ -197,7 +211,11 @@ class Humanoid_Batch:
         if len(self.cfg.extend_config) > 0:
             if return_full:
                 return_dict.global_velocity_extend = self._compute_velocity(wbody_pos, dt) 
-                return_dict.global_angular_velocity_extend = self._compute_angular_velocity(wbody_rot, dt)
+                return_dict.global_angular_velocity_extend = self._compute_angular_velocity(
+                    wbody_rot,
+                    dt,
+                    guassian_filter=self.cfg.get("smooth_angular_velocity", True),
+                )
                 
             return_dict.global_translation_extend = wbody_pos.clone()
             return_dict.global_rotation_mat_extend = wbody_mat.clone()
@@ -213,7 +231,11 @@ class Humanoid_Batch:
         return_dict.global_rotation = wbody_rot
         if return_full:
             rigidbody_linear_velocity = self._compute_velocity(wbody_pos, dt)  # Isaac gym is [x, y, z, w]. All the previous functions are [w, x, y, z]
-            rigidbody_angular_velocity = self._compute_angular_velocity(wbody_rot, dt)
+            rigidbody_angular_velocity = self._compute_angular_velocity(
+                wbody_rot,
+                dt,
+                guassian_filter=self.cfg.get("smooth_angular_velocity", True),
+            )
             return_dict.local_rotation = wxyz_to_xyzw(pose_quat)
             return_dict.global_root_velocity = rigidbody_linear_velocity[..., 0, :]
             return_dict.global_root_angular_velocity = rigidbody_angular_velocity[..., 0, :]
@@ -222,14 +244,13 @@ class Humanoid_Batch:
             
             
             if len(self.cfg.extend_config) > 0:
-                return_dict.dof_pos = pose.sum(dim = -1)[..., 1:self.num_bodies] # you can sum it up since unitree's each joint has 1 dof. Last two are for hands. doesn't really matter.
+                return_dict.dof_pos = pose.sum(dim = -1)[..., 1:self.num_bodies] # you can sum it up since unitree's each joint has 1 dof. Last two are for hands. doesn't really matter. 
             else:
                 if not len(self.actuated_joints_idx) == len(self.body_names):
-                    # Some bodies have no joint (e.g. BDX ear links). actuated_joints_idx
-                    # indexes jointed bodies but INCLUDES the root (body 0, via the
-                    # freejoint) — drop it so dof_pos has one entry per actuated DOF.
-                    non_root = self.actuated_joints_idx[self.actuated_joints_idx != 0]
-                    return_dict.dof_pos = pose.sum(dim = -1)[..., non_root]
+                    # hinge angle = projection of the local rotvec onto the joint axis
+                    # (exact for hinge joints; the raw component-sum was an axis-dependent approximation)
+                    axes = self._actuated_joint_axes.to(device=pose.device, dtype=pose.dtype)
+                    return_dict.dof_pos = (pose[..., self.actuated_joints_idx, :] * axes).sum(dim=-1)
                 else:
                     return_dict.dof_pos = pose.sum(dim = -1)[..., 1:]
             

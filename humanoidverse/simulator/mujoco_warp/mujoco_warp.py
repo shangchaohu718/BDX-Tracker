@@ -72,10 +72,8 @@ class MuJoCoWarp(BaseSimulator):
 
     def setup(self):
         hv_root = Path(__file__).parents[2]
-        # Scene path is config-driven: robot.asset.scene_file (relative to data/robots/).
-        # Falls back to the G1 scene so existing G1 runs are byte-identical.
         scene_file = self.robot_cfg.asset.get("scene_file", None)
-        if scene_file is None:
+        if not scene_file:
             scene_file = "g1/scene_29dof_freebase_mujoco.xml"
         self.model_path = str(hv_root / "data/robots" / scene_file)
 
@@ -191,22 +189,27 @@ class MuJoCoWarp(BaseSimulator):
 
         self.body_id = np.arange(self.num_bodies, dtype=np.int32) + 1
 
-        # If the loaded model has more bodies than the robot config expects, prune the
-        # extras (e.g. G1's fakehand bodies). Generalized from the old `"29" in model_path`
-        # check so any robot works. The asserts below still catch a true mismatch.
-        expected_bodies = list(self.robot_cfg.body_names)
-        if self.num_bodies > len(expected_bodies):
+        # For 29-DOF model, exclude hand bodies
+        if "29" in self.model_path:
             for b in range(self.mj_model.nbody):
                 name = mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, b)
-                if name and name not in expected_bodies and name in self.body_names:
-                    self.body_names.remove(name)
-                    self.num_bodies -= 1
-                    self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
+                if name and "hand" in name:
+                    if name in self.body_names:
+                        self.body_names.remove(name)
+                        self.num_bodies -= 1
+                        self.body_id = np.delete(self.body_id, np.where(self.body_id == b))
 
         assert self.num_dof == len(self.robot_cfg.dof_names), (
             f"DOF count mismatch: model={self.num_dof}, config={len(self.robot_cfg.dof_names)}"
         )
         assert self.dof_names == self.robot_cfg.dof_names, "DOF names mismatch"
+        # [BDX-VEL-CLAMP] per-joint velocity bounds from the robot config (dof_vel_limit_list)
+        _vl = getattr(self.robot_cfg, "dof_vel_limit_list", None)
+        if _vl is not None and len(_vl) == self.num_dof:
+            _cap = float(os.environ.get("BDX_VEL_CAP", "20.0"))
+            self._dof_vel_bound = torch.tensor([min(v, _cap) for v in _vl], dtype=torch.float32, device=self.sim_device)
+        else:
+            self._dof_vel_bound = None
         assert self.body_names == self.robot_cfg.body_names, "Body names mismatch"
 
         # Alias used by LeggedRobotMotions._init_motion_extend
@@ -327,8 +330,13 @@ class MuJoCoWarp(BaseSimulator):
             )
             self.mj_model.geom_friction[:] = friction
 
-        if self.domain_rand_config.get("randomize_base_com", False) and self.robot_cfg.has_torso:
-            torso_id = self.mj_model.body(self.robot_cfg.torso_name).id
+        if self.domain_rand_config.get("randomize_base_com", False):
+            motion_cfg = self.robot_cfg.get("motion", {})
+            base_name = motion_cfg.get("pelvis_link", None) or motion_cfg.get("base_link", None) or "torso_link"
+            valid = [mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(1, self.mj_model.nbody)]
+            if base_name not in valid:
+                base_name = valid[0]
+            torso_id = self.mj_model.body(base_name).id
             assert torso_id > -1
             x_range = self.domain_rand_config["base_com_range"]["x"]
             dmass_torso = np.random.uniform(low=x_range[0], high=x_range[1])
@@ -362,28 +370,18 @@ class MuJoCoWarp(BaseSimulator):
         # the live Warp memory (DLPack zero-copy view; proven by a direct propagation test). qpos=
         # [7 base + 29 joint], qvel=[6 base + 29 joint]. Gated by BFM_ZERO_HARD_LIMIT_CLAMP
         # (default 1 = on; =0 disables). THE actual NaN fix is BFM_ZERO_NAN_RESET below.
-        #
-        # [ARCH-CHECK 2026-07-07] Verified mujoco_warp's solver ALREADY enforces joint limits via the
-        # standard soft unilateral constraint (_limit_slide_hinge kernel in mujoco_warp/_src/constraint.py:
-        # `active = (qpos - range) < 0` -> restoring force via jnt_solref/jnt_solimp). The solver does NOT
-        # hard-clamp qpos -- it applies forces, so it cannot rescue an already-infeasible (past-limit)
-        # start state, which is the only thing this custom clamp did. Joint-limit enforcement is the
-        # simulator's job and the solver does it; this wrapper-level qpos patch was duplicating/overriding
-        # that responsibility in the wrong layer. Commented out accordingly. If a past-limit start state
-        # ever produces NaN again, the proper fix is the NaN-reset net (below) or an upstream solver
-        # change, not an env/qpos clamp.
-        # if os.environ.get("BFM_ZERO_HARD_LIMIT_CLAMP", "1") != "0" and getattr(self, "hard_dof_pos_limits", None) is not None:
-        #     _qp = wp.to_torch(self.d.qpos)               # [N, nq]
-        #     _qv = wp.to_torch(self.d.qvel)               # [N, nv]
-        #     _jp = _qp[:, 7:7 + self.num_dof]             # [N, 29] joint pos (LIVE view of d.qpos)
-        #     _lo = self.hard_dof_pos_limits[:, 0]
-        #     _hi = self.hard_dof_pos_limits[:, 1]
-        #     _past_hi = _jp > _hi                          # outbound mask BEFORE clamping
-        #     _past_lo = _jp < _lo
-        #     _jp.clamp_(min=_lo, max=_hi)                  # project joint pos into hard range (identity if in-bounds)
-        #     _jv = _qv[:, 6:6 + self.num_dof]             # [N, 29] joint vel (LIVE view of d.qvel)
-        #     _jv.masked_fill_(_past_hi & (_jv > 0), 0.0)  # kill velocity pushing further past the HI limit
-        #     _jv.masked_fill_(_past_lo & (_jv < 0), 0.0)  # kill velocity pushing further past the LO limit
+        if os.environ.get("BFM_ZERO_HARD_LIMIT_CLAMP", "1") != "0" and getattr(self, "hard_dof_pos_limits", None) is not None:
+            _qp = wp.to_torch(self.d.qpos)               # [N, nq]
+            _qv = wp.to_torch(self.d.qvel)               # [N, nv]
+            _jp = _qp[:, 7:7 + self.num_dof]             # [N, 29] joint pos (LIVE view of d.qpos)
+            _lo = self.hard_dof_pos_limits[:, 0]
+            _hi = self.hard_dof_pos_limits[:, 1]
+            _past_hi = _jp > _hi                          # outbound mask BEFORE clamping
+            _past_lo = _jp < _lo
+            _jp.clamp_(min=_lo, max=_hi)                  # project joint pos into hard range (identity if in-bounds)
+            _jv = _qv[:, 6:6 + self.num_dof]             # [N, 29] joint vel (LIVE view of d.qvel)
+            _jv.masked_fill_(_past_hi & (_jv > 0), 0.0)  # kill velocity pushing further past the HI limit
+            _jv.masked_fill_(_past_lo & (_jv < 0), 0.0)  # kill velocity pushing further past the LO limit
 
         # [BFM-DIAG-NAN] observe-only probe: snapshot pre-step |qvel| (async, no host sync) so
         # that IF this substep produces a non-finite state we can report the extreme state that
@@ -439,6 +437,17 @@ class MuJoCoWarp(BaseSimulator):
         # set_dof_state_tensor uses the same __setitem__ path). When every env is finite the mask is
         # all-False and the write is an identity. qpos=[7 base + 29 joint], qvel=[6 base + 29 joint].
         # Gated by BFM_ZERO_NAN_RESET (default 1 = on; =0 reproduces the baseline divergence for A/B).
+        # [BDX-VEL-CLAMP] bound joint velocities at the ROBOT-DECLARED physical limit
+        # (robot.dof_vel_limit_list, capped by BDX_VEL_CAP=20). NaN probe pinned the divergence
+        # to "huge PRE-step |qvel| (no dof-vel bound)": saturated P-torque on ~1e-5 kg*m^2 joint
+        # inertia runs |qvel| to fp32 overflow within ~50 substeps. Heal-not-terminate.
+        if os.environ.get("BFM_ZERO_DOF_VEL_CLAMP", "1") != "0" and getattr(self, "_dof_vel_bound", None) is not None:
+            _qv = wp.to_torch(self.d.qvel)
+            _jv = _qv[:, 6:6 + self.num_dof]
+            _jv.clamp_(min=-self._dof_vel_bound, max=self._dof_vel_bound)
+            _qv[:, 0:3].clamp_(min=-50.0, max=50.0)
+            _qv[:, 3:6].clamp_(min=-50.0, max=50.0)
+
         if os.environ.get("BFM_ZERO_NAN_RESET", "1") != "0" and getattr(self, "_nan_safe_qpos", None) is not None:
             _qp = wp.to_torch(self.d.qpos)  # [N, nq] live view of d.qpos (post-step, possibly non-finite)
             _qv = wp.to_torch(self.d.qvel)  # [N, nv] live view of d.qvel
@@ -708,15 +717,10 @@ class MuJoCoWarp(BaseSimulator):
             torques = torques.contiguous()
         # Convert to warp array (zero-copy if already on CUDA)
         wp_torques = wp.from_torch(torques, dtype=wp.float32)
-        if self.freebase:
-            # G1's MJCF defines 6 virtual base actuators (fx..tz) before the joint
-            # motors, so ctrl = [6 base | 29 joints] and the offset is 6. BDX has no
-            # base actuators, so ctrl = [14 joints] and the offset is 0. Derive it as
-            # nu - num_dof (works for both; equals 6 for G1, 0 for BDX).
-            ctrl_offset = self.mj_model.nu - self.num_dof
-            wp.copy(self.d.ctrl[:, ctrl_offset:], wp_torques)
-        else:
-            wp.copy(self.d.ctrl, wp_torques)
+        # actuator offset: G1's scene carries 6 extra free-base actuators (nu=6+ndof);
+        # BDX's motors map 1:1 onto the hinges (nu=ndof) -> offset 0
+        off = self.mj_model.nu - self.num_dof
+        wp.copy(self.d.ctrl[:, off:], wp_torques)
 
     def set_actor_root_state_tensor(self, set_env_ids, root_states):
         if isinstance(set_env_ids, torch.Tensor):
