@@ -50,6 +50,8 @@ def bootstrap_ci(vals, groups, n=2000, seed=0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-clips", type=int, default=600)
+    ap.add_argument("--checkpoint", default=None,
+                    help="default: canonical registry planner")
     args = ap.parse_args()
     # SUPERSEDED guard (user ruling 2026-09-04): refuse to (re)write the
     # stale canonical deployment_eval.json — redirect output to a
@@ -66,8 +68,9 @@ def main():
     from humanoidverse.planner.dataset import set_preprocess_version
     set_preprocess_version("fixed_v1")   # v1.1 representation
     model = CommandedEncoder(latent_dim=64, cmd_dim=7).to(device).eval()
-    ckpt = str(_reg["planner"])
-    print(f"planner under eval: {Path(ckpt).name} (registry)")
+    ckpt = str(args.checkpoint) if args.checkpoint else str(_reg["planner"])
+    print(f"planner under eval: {Path(ckpt).name} "
+          f"({'override' if args.checkpoint else 'registry'})")
     model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=False)["model"])
     stats = load_stats(OUT_DIR / "p1_stats.json")
     sp = {k: torch.tensor(v) for k, v in json.loads((OUT_DIR / "p2_stats32.json").read_text()).items()}
