@@ -85,6 +85,28 @@ def envelope_dict():
     return {k: asdict(v) for k, v in ENVELOPE.items()}
 
 
+# ---------------------------------------------------------------------------
+# ADDITIVE 2026-09-07 (canonical adoption of v12, user ruling
+# DISTILL_CANONICAL_ADOPTION_V12). ENVELOPE above is the validated
+# open-loop/completion-form envelope and is UNCHANGED. This dict is the
+# CLOSED-LOOP deployment binding: the bounded smoke (12 trials, frozen
+# SMOKE_PLAN) failed 12/12 under the official runtime, whose auto-reset
+# limit cycle pins net x-displacement ~0 for ANY command sign (a forward
+# control trial nets ~0 too, and the official v12 deployment eval shows
+# vx slope -0.252/R2 0.091 while vy R2=0.95). Mechanical disposition:
+# backward = UNSUPPORTED in closed loop; negatives are REJECTED (not
+# clamped) by command_adapter_v13. Evidence:
+# bdx_planner_distill/20260907T0100Z_v12smoke/DISPOSITION.json
+# ---------------------------------------------------------------------------
+CLOSED_LOOP_DEPLOYMENT_ENVELOPE = {
+    "vx":   ChannelEnvelope(0.0, 0.5, True,
+        "closed-loop smoke 2026-09-07: 12/12 FAIL -> negatives rejected; "
+        "backward unrefuted-but-uncertified (instrument x-channel invalid)"),
+    "vy":   ChannelEnvelope(-0.2, 0.2, True, "deployment slope 0.686 R2 0.948"),
+    "vyaw": ChannelEnvelope(-0.5, 0.5, True, "deployment slope 0.536 R2 0.684"),
+}
+
+
 def _test():
     import numpy as np
     a, m, w = clamp_command([0.5, -0.5, 0.0, 0.0, -0.5, 0.0, 0.0])
