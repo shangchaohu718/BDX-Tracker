@@ -100,8 +100,10 @@ def envelope_dict():
 # ---------------------------------------------------------------------------
 CLOSED_LOOP_DEPLOYMENT_ENVELOPE = {
     "vx":   ChannelEnvelope(0.0, 0.5, True,
-        "closed-loop smoke 2026-09-07: 12/12 FAIL -> negatives rejected; "
-        "backward unrefuted-but-uncertified (instrument x-channel invalid)"),
+        "positive range = legacy-compatible, completion-form validated ONLY; "
+        "closed-loop (forward AND backward) not established in current runtime "
+        "(RUNTIME_X_AXIS_TERMINATION_LOOP). Negatives rejected; backward "
+        "unrefuted-but-uncertified (smoke 12/12 FAIL, instrument-bound)"),
     "vy":   ChannelEnvelope(-0.2, 0.2, True, "deployment slope 0.686 R2 0.948"),
     "vyaw": ChannelEnvelope(-0.5, 0.5, True, "deployment slope 0.536 R2 0.684"),
 }

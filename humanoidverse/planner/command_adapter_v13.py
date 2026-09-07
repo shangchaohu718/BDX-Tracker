@@ -18,6 +18,11 @@ There is deliberately NO path that bypasses this envelope to a bare
 checkpoint — callers go through adapt()/adapt_json() or they are not
 using the canonical package.
 
+Positive vx scope label (user terminal ruling 2026-09-07): completion-form
+validated / legacy-compatible / closed-loop not established in current
+runtime (RUNTIME_X_AXIS_TERMINATION_LOOP). Passing a positive command
+through this adapter must never be represented as "closed-loop verified".
+
 Run tests: .venv/bin/python -m humanoidverse.planner.command_adapter_v13
 """
 import datetime
