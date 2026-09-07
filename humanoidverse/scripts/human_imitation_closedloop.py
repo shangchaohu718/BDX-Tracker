@@ -52,6 +52,9 @@ LAFAN = DATA / "lafan_29dof_10s-clipped.pkl"
 OUT_DIR = REPO / "data" / "bdx_planner_distill" / "20260907T_humanImitation"
 MODEL_FOLDER = REPO.parent / "results" / "bfmzero-bdx-full"
 CLIP = sys.argv[1] if len(sys.argv) > 1 else "dance1_subject3_clip1"
+# optional end-frame trim: most LAFAN clips contain mocap-dropout garbage
+# (feet flying to 1.4m) outside the physically-sane segment chosen by scan
+END = int(sys.argv[2]) if len(sys.argv) > 2 else None
 FPS = 50
 SCALE_TARGET_BASE_Z = 0.30      # BDX walking base height (dataset convention)
 
@@ -170,6 +173,12 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     os.environ["BDX_ADAPTER_EVENT_LOG"] = str(OUT_DIR / "adapter_events.jsonl")
     hu = load_human(CLIP)
+    if END is not None:
+        hu = {k: (v[:END] if (isinstance(v, np.ndarray)
+                              and v.shape[:1] == (hu["T"],)) else v)
+              for k, v in hu.items()}
+        hu["T"] = min(END, hu["T"])
+        print(f"trimmed to first {hu['T']} frames (sane segment)")
     T = hu["T"]
 
     reg = resolve_canonical(DATA / "bdx_planner_v2combo")
@@ -265,11 +274,13 @@ def main():
         hu_w = {k: v[f0:f1] for k, v in hu.items()
                 if isinstance(v, np.ndarray) and v.shape[:1] == (hu["T"],)}
         psi = float(hu["yaw"][f0])
-        # command from human pelvis velocity (yaw frame, BDX-scaled)
-        v = hu["base_linvel"][f0]
+        # command from human pelvis velocity, window-mean (less noisy than
+        # single-frame gradient), yaw frame at window start, BDX-scaled
+        v = hu["base_linvel"][f0:f1].mean(0)
         c_, s_ = np.cos(psi), np.sin(psi)
         vx, vy = v[0] * c_ + v[1] * s_, -v[0] * s_ + v[1] * c_
-        vyaw = float(hu["head_angvel"][f0, 2])
+        vyaw = float(np.angle(np.exp(
+            1j * (hu["yaw"][min(f1, T - 1)] - psi))) / (WINDOW / 50))
         try:
             out = adapt({"skill": "locomotion",
                          "velocity": {"forward": float(vx), "lateral": float(vy),
@@ -375,12 +386,12 @@ def main():
                 "(pelvis/head/feet, BDX-scaled); tracker = bfmzero-bdx-full",
         "generated": datetime.now(timezone.utc).isoformat(),
     }
-    (OUT_DIR / "HUMAN_IMITATION_RESULT.json").write_text(
+    (OUT_DIR / f"result_{hu['name']}.json").write_text(
         __import__("json").dumps(metrics, indent=1, ensure_ascii=False))
     if frames:
-        media.write_video(str(OUT_DIR / "human_imitation.mp4"),
-                          frames, fps=25)
-        print("video:", OUT_DIR / "human_imitation.mp4")
+        vp = OUT_DIR / f"imitation_{hu['name']}.mp4"
+        media.write_video(str(vp), frames, fps=25)
+        print("video:", vp)
     print("DONE", metrics)
 
 
