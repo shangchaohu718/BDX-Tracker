@@ -43,6 +43,8 @@ gh release download bfmzero-bdx-full-checkpoint -R shangchaohu718/BDX-Tracker \
   -D /path/to/BFM-zero/results/bfmzero-bdx-full
 # 资产: model.safetensors -> checkpoint/model/, optimizers.pth -> checkpoint/,
 #        config.json -> 根目录
+# 另一资产 lafan_29dof.zip (151MB) -> humanoidverse/data/lafan_29dof.zip
+#   （LAFAN 源 mocap 数据，人体模仿管线输入；超 100MB 文件限制故走 Release）
 ```
 
 还原后运行闭环 demo：
