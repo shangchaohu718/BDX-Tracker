@@ -1,0 +1,10 @@
+{
+ "clip": "fightAndSports1_subject1_clip19",
+ "frames": 250,
+ "scale": 0.3996889200681871,
+ "teleport_steps_gt5cm": 16,
+ "adapter_events_total": 0,
+ "runtime_issue": "RUNTIME_X_AXIS_TERMINATION_LOOP (disclosed)",
+ "note": "leg imitation = qualitative (3-panel video is primary evidence); planner input = human 5 sparse points only (pelvis/head/feet, BDX-scaled); tracker = bfmzero-bdx-full",
+ "generated": "2026-09-07T03:32:10.716967+00:00"
+}

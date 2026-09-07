@@ -1,0 +1,28 @@
+{
+ "checkpoint": "p2_studentv13.pt",
+ "heldout_clips": 29,
+ "families": [
+  "walk_sweep_151900",
+  "walk_sweep_151844",
+  "walk_sweep_151932",
+  "walk_sweep_151916",
+  "walkhead_relax",
+  "walkhead_bored_snore",
+  "walkhead_angry_no",
+  "walkhead_neutral_no"
+ ],
+ "windows": 1073,
+ "neg_cmd_windows": 941,
+ "cmd_vx_mean": -0.22391999648245012,
+ "realized_vx_mean": -0.21880361494977216,
+ "realized_vx_neg_frac_back": 0.9989373007438895,
+ "dvx_mean": 0.013760906640530927,
+ "dvx_p90": 0.028092926740646364,
+ "sign_inversions": 1,
+ "q_mrad_mean": 42.46088114878005,
+ "q_mrad_p90": 62.78081359863282,
+ "g2_gate": {
+  "no_sign_inversion": false,
+  "dvx_le_0.05": true
+ }
+}

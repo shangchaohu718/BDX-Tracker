@@ -1,0 +1,47 @@
+{
+ "plan": "DISTILL_CANONICAL_ADOPTION_V12 bounded closed-loop backward smoke (user ruling 2026-09-07)",
+ "frozen_at": "2026-09-07T01:00Z (BEFORE any smoke trial ran)",
+ "runtime": "closed_loop_test.py chain verbatim: sim true state -> FK -> sparse hist -> planner(v12) -> teacher.decode -> runtime motion-lib injection -> get_backward_observation slice -> backward_map -> project_z -> model.act, MuJoCo 50Hz, num_envs=1, tracker=results/bfmzero-bdx-full",
+ "checkpoint": "p2_student_v12.pt sha256 first16 34047cde8f6c5a3b (overlay canonical.json mirrors post-promotion registry)",
+ "chain_policy": "EVERY window command routed through planner.command_adapter_v12.adapt() Level-1 JSON; direct student calls forbidden; per-trial adapter event log via BDX_ADAPTER_EVENT_LOG",
+ "neck_neutral_mapping": "attention.target='forward' = adapter neutral pose (neck_forward 0.50, neck_pitch -0.50, neck_yaw 0.0, roll 0) — adapter schema has no zero-pose target; disclosed, not invented",
+ "command_levels_vx": [-0.15, -0.3, -0.5, -0.65],
+ "reset_variants": {
+   "seed_frames": [0, 17, 33],
+   "rule": "robot initial pose + planner history seeded from pristine dummy motion frames at fixed offset; deterministic, zero RNG; offsets chosen inside one gait cycle for phase diversity",
+   "disclosure": "motion time still starts at 0 (harness invariant); offset!=0 has a brief initial ref mismatch absorbed by the 2s settle"
+ },
+ "trials": [
+   {"level": -0.15, "seed": 0}, {"level": -0.15, "seed": 17}, {"level": -0.15, "seed": 33},
+   {"level": -0.3, "seed": 0}, {"level": -0.3, "seed": 17}, {"level": -0.3, "seed": 33},
+   {"level": -0.5, "seed": 0}, {"level": -0.5, "seed": 17}, {"level": -0.5, "seed": 33},
+   {"level": -0.65, "seed": 0}, {"level": -0.65, "seed": 17}, {"level": -0.65, "seed": 33}
+ ],
+ "segments_s": {"settle": 2.0, "command": 10.0, "stop": 3.0},
+ "windows_per_trial": 15,
+ "segment_commands_level1": {
+   "settle": {"skill": "locomotion", "velocity": {"forward": 0.0, "lateral": 0.0, "yaw_rate": 0.0}, "attention": {"target": "forward"}, "duration": 1.0},
+   "command": "same with velocity.forward = level",
+   "stop": "same as settle"
+ },
+ "checks": {
+   "no_fall": "base_z < 0.5 * median(settle-phase base_z) sustained >= 0.5 s (25 steps)",
+   "no_termination": "no unexpected episode_length_buf drop to 0 AND no teleport (|dxy| > 0.1 m in one step)",
+   "no_sustained_nonfoot_contact": "contact pair involving robot geom whose name lacks 'foot' (self-pair or with floor) continuous >= 0.5 s (25 steps); brief touches disclosed but pass",
+   "sign_reversal_G2_frozen": "per 1 s sub-window of the 10 s command segment: cmd <= -0.05 AND realized_vx > 0 (G2 original predicate, zero tolerance). realized_vx = displacement projected on heading-at-command-start / 1 s",
+   "steady_negative": "mean realized_vx over steady sub-windows (t in [4,10] s of command segment) < 0",
+   "monotone": "per-level mean |realized_vx| (over steady sub-windows, 3 seeds) non-decreasing toward deeper levels with 0.02 m/s tie tolerance; plus |v(-0.65)| > |v(-0.15)|",
+   "adapter_no_clamp": "zero adapter saturation events across all 12 trials (all levels inside [-0.65, 0))",
+   "stop_residual": "over final 1 s: mean |vx| <= 0.10 m/s AND mean vx >= -0.05 m/s (no sustained backward); no fall/teleport in stop segment"
+ },
+ "pass_unit": "a LEVEL passes iff all 3 seed variants pass every per-trial check",
+ "envelope_mapping": {
+   "all levels pass": "[-0.65, 0)",
+   "-0.65 fails, rest pass": "[-0.50, 0)",
+   "-0.50 and below fail": "largest contiguous pass range from 0 toward negative",
+   "all fail": "backward UNSUPPORTED; adapter rejects negative vx"
+ },
+ "artifact_per_trial": ["trial mp4 (25fps, every 2nd step)", "trial npz (qpos 750x21, base_z, ep_len, nonfoot-contact flag, cmd timeline, realized subwindow vx)", "adapter events jsonl", "sha256 of each"],
+ "forbidden": ["bypassing adapter", "modifying checkpoint", "modifying training data", "modifying thresholds", "switching resets based on mid-run results", "merging e133f9e", "writing canonical data dir"],
+ "regardless_of_outcome": "v12 is promoted (V11_CANONICAL_RETENTION=REJECTED); only the envelope binds to the passed range"
+}

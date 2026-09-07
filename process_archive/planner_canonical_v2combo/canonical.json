@@ -1,0 +1,86 @@
+{
+ "status": "canonical",
+ "checkpoint": "p2_student_v12.pt",
+ "teacher": "p1_ae_l64.pt",
+ "preprocess_version": "fixed_v1",
+ "stats_version": "p2_stats32.json (recomputed under fixed_v1)",
+ "checkpoint_sha256_16": "34047cde8f6c5a3b",
+ "teacher_sha256_16": "e77a5746ff678e44",
+ "command_interface": "7D [neck_fwd, neck_pitch, neck_yaw, neck_roll, vx, vy, vyaw] \u2014 FROZEN",
+ "registry": {
+  "v11": "SUPERSEDED_INVALID_LINEAGE (train pool contained heldout _rev + twins; backward lineage contaminated \u2014 user ruling 2026-09-07)",
+  "v13": "REJECTED_SINGLE_SIGN_REVERSAL (G2 frozen predicate: 1 sign-inverted window)",
+  "v12": "CANONICAL (adopted 2026-09-07; see ADOPTION_MANIFEST.json)"
+ },
+ "canonical_since": "2026-09-07",
+ "superseded_pointer": "canonical_v11_archived_20260907.json",
+ "capability_envelope": {
+  "vx": {
+   "min": 0.0,
+   "max": 0.5,
+   "validated": true,
+   "note": "backward = UNSUPPORTED in closed loop (smoke 12/12 FAIL; adapter v1.3 REJECTS velocity.forward<0). POSITIVE vx scope label (user terminal ruling 2026-09-07): completion-form validated / legacy-compatible / closed-loop not established in current runtime \u2014 must NOT be represented as closed-loop verified. Root blocker = RUNTIME_X_AXIS_TERMINATION_LOOP (ISSUES/RUNTIME_X_AXIS_TERMINATION_LOOP.md). Mid-speed vx realization 55-65% = teacher ceiling (planner/teacher 1.08, sweep 0.90)."
+  },
+  "vx_four_quadrant": {
+   "forward_completion_form": "VALIDATED",
+   "backward_completion_form": "VALIDATED (original sweep 0.90 / G2 zero-reversal evidence remains valid)",
+   "forward_closed_loop": "NOT ESTABLISHED (forward-control diagnostic also nets ~0 in this runtime)",
+   "backward_closed_loop": "NOT CERTIFIED (product side UNSUPPORTED; 12/12 smoke FAIL cannot refute planner backward generation \u2014 instrument-bound)"
+  },
+  "positive_vx_scope_label": ["completion-form validated", "legacy-compatible", "closed-loop not established in current runtime"],
+  "runtime_issue": "RUNTIME_X_AXIS_TERMINATION_LOOP \u2014 REGISTERED, belongs to tracker/runtime integration (termination/reset + motion injection continuity), NOT to v12 training/planner/backward-data; fix requires explicit user decision, then SYMMETRIC forward+backward re-test on the original frozen plan",
+  "vy": {
+   "min": -0.2,
+   "max": 0.2,
+   "validated": true,
+   "note": "deployment slope 0.686 R2 0.948 (healthy channel)"
+  },
+  "vyaw": {
+   "min": -0.5,
+   "max": 0.5,
+   "validated": true,
+   "note": "deployment slope 0.536 R2 0.684"
+  },
+  "neck_forward": {
+   "min": 0.3,
+   "max": 0.7,
+   "validated": "home-range only",
+   "note": "adapter 'up' pose DISABLED (neck_forward=1.2 outside envelope)"
+  },
+  "neck_pitch": {
+   "min": -0.3,
+   "max": 0.35,
+   "validated": "partial"
+  },
+  "neck_yaw": {
+   "min": -0.6,
+   "max": 0.6,
+   "validated": true,
+   "note": "slope 1.00 R2 0.96"
+  },
+  "neck_roll": {
+   "min": 0.0,
+   "max": 0.0,
+   "validated": false,
+   "note": "channel inert in deployment data"
+  },
+  "known_limitations": [
+   "closed-loop backward UNSUPPORTED: not certifiable under the official runtime in its current configuration (auto-reset limit cycle pins net x ~0 for ANY command sign). Completion-form evidence (sweep 0.90, G2 zero reversals) remains valid AS completion-form only. Re-test path: fix runtime termination regime (R26 precedent), re-run frozen SMOKE_PLAN unchanged",
+   "closed-loop deployment x-channel instrument INVALID (v11 -0.284/R2 0.053 and v12 -0.252/R2 0.091 both instrument-dominated; do not read as model regression or improvement)",
+   "completion_form_q_mean 63.3 -> 68.6 mrad (+5.3, same-instrument run variance absorbs it; adoption rule accommodated ±10) and deployment_q_error_mean 25.975 -> 26.56 (+0.58) vs v11",
+   "mid-speed vx realization 55-65% = TEACHER ceiling, not student loss",
+   "neck_forward / neck_roll effectively unvalidated in deployment gate",
+   "frozen-decoder manifold: new behaviors beyond it require a P1 reconstruction gate BEFORE encoder work",
+   "system-level closed-loop acceptance pending tracker/runtime maturity; planner demo (demo_planner.mp4) human signoff (EXTERNAL_DEMO_SIGNOFF) still pending \u2014 blocks external demo only, not this adoption"
+  ],
+  "fk_note": "FK 12.0 mm baseline (canonical-frame-consistent, corrected 2026-08-24)"
+ },
+ "adoption": "ADOPTION_MANIFEST.json (atomic package: checkpoint+capability+adapter v1.3+normalization+lineage+SHA+rule+instrument matrix+limitations+smoke)",
+ "evidence": [
+  "bdx_planner_distill/20260905T0400Z_p54_final/ (FINAL_EVAL, ADOPTION_RULE, v12 parity)",
+  "bdx_planner_distill/20260907T0100Z_v12smoke/ (SMOKE_PLAN frozen, SMOKE_RESULT 12/12 FAIL, DISPOSITION UNSUPPORTED)",
+  "bdx_planner_distill/20260907T0130Z_diagFwd/ (forward-control diagnostic: instrument cannot show net x-locomotion)",
+  "paired_ab_result.json", "deployment_eval.json (v11-era, superseded)", "AUDIT_FIX_EVIDENCE.json"
+ ],
+ "date": "2026-09-07"
+}

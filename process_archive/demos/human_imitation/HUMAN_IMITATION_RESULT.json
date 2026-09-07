@@ -1,0 +1,10 @@
+{
+ "clip": "dance1_subject3_clip1",
+ "frames": 500,
+ "scale": 0.3834315610958818,
+ "teleport_steps_gt5cm": 1,
+ "adapter_events_total": 6,
+ "runtime_issue": "RUNTIME_X_AXIS_TERMINATION_LOOP (disclosed)",
+ "note": "leg imitation = qualitative (3-panel video is primary evidence); planner input = human 5 sparse points only (pelvis/head/feet, BDX-scaled); tracker = bfmzero-bdx-full",
+ "generated": "2026-09-07T03:05:51.561279+00:00"
+}

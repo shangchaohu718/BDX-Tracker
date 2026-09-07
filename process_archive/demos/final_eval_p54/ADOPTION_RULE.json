@@ -1,0 +1,17 @@
+{
+ "artifact": "CHECKPOINT_ADOPTION_RULE",
+ "frozen": "2026-09-05T04:00Z — BEFORE any v12/v13 deployment/backward/combo numbers were computed (only v11 canonical numbers and completion-form q known: v11 63.3 / v12 68.6 / v13 59.6)",
+ "candidates": ["v11 (canonical)", "v12 (backward lineage-clean)", "v13 (v12 minus 15 gesture groups)"],
+ "eligibility": {
+  "E1_g3_deployment_q_le_30mrad": "deployment-form q mean <= 30 mrad on the 414 lineage-val intervention clips",
+  "E2_backward_gates_and_lineage": "backward heldout gates pass (sign inversions 0, |dvx| mean <= 0.05, neg-cmd windows 100% realized-negative) AND training pool lineage-clean w.r.t. that heldout (heldout _rev + their forward twins absent from train). v11 FAILS the lineage clause by construction (its train contains the heldout families' twins and 358 _rev) -> v11 is NOT eligible for a backward-claiming product; fallback role only.",
+  "E3_envelope_bindable": "per-depth-band envelope min derivable under the frozen worst-case rule (target -0.65; v11 would bind -0.60)"
+ },
+ "priority_among_eligible": {
+  "P1": "if the deployment-q leader leads the runner-up by >3 mrad -> adopt the leader",
+  "P2": "if all eligible candidates within 3 mrad -> adopt by evidence strength: v13 > v12 (v13 = v12 evidence + gesture whole-group holdout + lineage-clean backward pool)",
+  "rationale": "completion-form run-to-run variance measured at +-10 mrad (v11 63.3 / v12 68.6 / v13 59.6, same config); a 3 mrad deployment-q band prevents chasing noise, evidence ordering breaks ties deterministically"
+ },
+ "fallback_if_no_candidate_eligible": "product stays v11 (canonical), backward envelope tightened to -0.60 with disclosure that its heldout pass is train-contaminated (lineage leak) — evidence-grade claims only from v12/v13 family",
+ "envelope_binding": "adopted checkpoint's own depth-band min becomes capability envelope vx.min (v1.2 artifacts updated accordingly at P6)"
+}

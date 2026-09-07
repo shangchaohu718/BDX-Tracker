@@ -1,0 +1,44 @@
+{
+ "purpose": "MACHINE-READABLE AUTHORITY OVERLAY — 用户裁决 2026-09-04 要求。旧 canonical.json 的 capability_envelope.narrative 与旧 deployment_eval.json 已被取代。本文件为消费脚本的唯一权威指针；正典目录只读，旧文件不回改。",
+ "issued_by": "user ruling 2026-09-04 (P0-P2 review PASS)",
+ "superseded": {
+  "bdx_planner_v2combo/deployment_eval.json": {
+   "sha256": "88f0a24e038e17ac9f8152674304d62672f6a9abee6e5755b362f4337e767a11",
+   "status": "SUPERSEDED",
+   "reason": "20-row filtered subset (vx n=5) from pre-fix eval script; not comparable to the 414-window lineage-val gate; canonical.json's 'vx validated:true / realization 0.57-0.65' narrative derives from it",
+   "do_not_cite": true
+  },
+  "bdx_planner_v2combo/canonical.json:capability_envelope.vx.validated": {
+   "sha256_context": "71718401b56277027cbb0f4a489e51471927c2ca9712f80c4f37a6e3f47da542",
+   "status": "SUPERSEDED_NARRATIVE",
+   "reason": "based on n=5 stale artifact; current ruling: vx gate judged by sweep instrument (see authority_of_record)",
+   "still_valid": ["checkpoint pointer p2_student_v11.pt", "teacher pointer p1_ae_l64.pt", "preprocess fixed_v1", "7D command interface FROZEN"]
+  }
+ },
+ "authority_of_record": {
+  "closure_status.json": {
+   "sha256": "042bbe643f7aed4d1adbb3863938e1b50e5762f5d16d7c878c3bcff3cd56dc0f",
+   "authoritative_for": "v11 deployment headline (q 25.975 mrad / fk 12.02 mm)"
+  },
+  "teacher_realization.json": {
+   "sha256": "c750d254cf96700db7dcbce020c2abec6590fc59d667ef8cd0084ce2802d8de0",
+   "authoritative_for": "three-layer gains (teacher/planner vs requested, planner vs teacher) + per_bin coverage proof"
+  },
+  "P2_1_SWEEP_EVIDENCE.md": {
+   "sha256": "51b699d4396bbc0a50e6563ede9c9a0197b67c65ee11cdfdb3c9be5ba27aeb72",
+   "authoritative_for": "vx sweep instrument ruling (0.8691/R0.9982/6-6 sign) + 5 _rev clips identity + INVALID-INSTRUMENT amendment"
+  },
+  "BASELINE_REPRODUCE.md": {
+   "sha256": "bf6803c0bcedda4865d0d2fd13fbf6d4344cc7733aee9ff78bb99796979ccc04",
+   "authoritative_for": "baseline reproduction provenance + superseded marking"
+  }
+ },
+ "consumer_contract": {
+  "rule": "任何脚本读取旧 canonical.json 的 capability_envelope 或旧 deployment_eval.json 时，必须同时读本 overlay 并遵循 authority_of_record；检测到 SUPERSEDED 的字段一律不得引用。",
+  "enforcement": "P4 将在 eval 脚本入口实现 SUPERSEDED 检测守卫（用户裁决：不能只靠 Markdown 提示）"
+ },
+ "git_baseline": {
+  "campaign_line": "0edb207 -> 90e16f3",
+  "remote_e133f9e": "OBSERVED_NOT_MERGED — 不得 merge/cherry-pick/push，bf16 修复需战役收口后另开分支评估"
+ }
+}

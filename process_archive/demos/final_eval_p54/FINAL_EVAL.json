@@ -1,0 +1,94 @@
+{
+ "artifact": "FINAL_EVAL",
+ "phase": "P5.4",
+ "generated": "2026-09-05T04:00Z (distill campaign)",
+ "adoption_rule": "2026-09-05T04:00Z \u2014 BEFORE any v12/v13 deployment/backward/combo numbers were computed (only v11 canonical numbers and completion-form q known: v11 63.3 / v12 68.6 / v13 59.6)",
+ "candidates": {
+  "v11": {
+   "deployment_q": 25.975,
+   "E1": true,
+   "E2": "FAIL_lineage (trained on heldout _rev + twins; numeric pass 0.0142/0-inv is train-contaminated)",
+   "E3": "-0.60 (own bands)"
+  },
+  "v12": {
+   "deployment_q": 26.56,
+   "E1": true,
+   "E2": "PASS (inv 0, |dvx| 0.0135, lineage-clean)",
+   "E3": -0.65
+  },
+  "v13": {
+   "deployment_q": 26.41,
+   "E1": true,
+   "E2": "FAIL_gate (sign inversions 1: one shallow-cmd window -0.063 -> +0.018 m/s)",
+   "E3": "not evaluated (ineligible)"
+  }
+ },
+ "eligible": [
+  "v12"
+ ],
+ "rule_applied": "P2 tie-band (<=3 mrad) -> evidence order; eligible=['v12']",
+ "ADOPTED": "v12",
+ "completion_form_context": {
+  "v11": 63.3,
+  "v12": 68.6,
+  "v13": 59.6,
+  "note": "same-config run variance +-10 mrad; v12 completion regression vs v11 (+5.3) is within this band \u2014 disclosed, deployment form is the adoption instrument"
+ },
+ "gates": {
+  "G1": {
+   "vx": "PASS via sweep instrument (frozen rule: deployment INVALID, teacher unreachable) \u2014 v12 sweep 0.90 / sign incl. reverse (P3.2.3)",
+   "vy": "PASS 0.686/0.948",
+   "vyaw": "PASS 0.536/0.684",
+   "neck_yaw": "PASS 1.004/0.959",
+   "neck_pitch": "PASS deployment instrument (P4.1 formal: student 1.215/0.9955, teacher reachable 1.248/0.9999)",
+   "neck_forward/roll": "FROZEN_WITH_DISCLOSURE (P4.2 worst-history gate; adapter statements issued)"
+  },
+  "G2": {
+   "verdict": "PASS \u2014 terminal A, 5/5 conditions (P3.1\u2013P3.3: gate 1.244x/1.041x; heldout 0 inv / 0.0135 / q 42.6; envelope [-0.65,0) + adapter clamp+events)",
+   "binding": "adopted=v12 -> envelope min -0.65 (capability_v12)"
+  },
+  "G3": {
+   "val_q_deployment_mrad": 26.56,
+   "gate_le_30": true,
+   "fk_mm": 11.78,
+   "planner_over_teacher": {
+    "vx": {
+     "n": 231,
+     "parity_slope": 1.003,
+     "r2": 0.999
+    },
+    "vy": {
+     "n": 130,
+     "parity_slope": 0.998,
+     "r2": 0.999
+    },
+    "vyaw": {
+     "n": 153,
+     "parity_slope": 0.996,
+     "r2": 1.0
+    }
+   },
+   "gate_le_1.15": true,
+   "holdout_slices_max_mrad": 32.4,
+   "gate_slices_le_45": true,
+   "note": "gate covers the 4 combo HOLDOUT slices per G3 text; training-combo slices disclosed separately (max 56.9 at an n=1 singleton slice)"
+  },
+  "G4": {
+   "verdict": "ESTABLISHED via v13 controlled experiment (single-variable: v12 minus 15 gesture groups)",
+   "heldout_q": 65.63,
+   "fit_control_q": 66.36,
+   "gap": -0.73,
+   "teacher_floor": 27.87,
+   "disclosure": "product v12 itself has no gesture holdout possible (all clips trained); generalization evidence belongs to the training-config line via v13"
+  }
+ },
+ "evidence_paths": {
+  "v11_headline": "bdx_planner_v2combo/closure_status.json",
+  "v12_backheld": "20260904T2100Z_p323_accept/v12_holdout.json",
+  "v13_backheld": "p54/v13_backward_holdout.json",
+  "depth_bands": "20260904T2200Z_p33_v12artifacts/backward_depth_bands.json",
+  "instrument_matrix": "20260904T2300Z_p41_matrix/",
+  "neck_disposition": "20260904T2400Z_p42_neckdispo/",
+  "g4": "20260905T0300Z_p53_g4eval/GESTURE_HOLDOUT_RESULT.json"
+ }
+}

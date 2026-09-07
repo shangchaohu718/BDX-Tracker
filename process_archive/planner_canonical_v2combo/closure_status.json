@@ -1,0 +1,54 @@
+{
+ "generated": "2026-08-24T15:11:18",
+ "canonical": {
+  "checkpoint": "p2_student_v11.pt",
+  "preprocess": "fixed_v1",
+  "status": "canonical"
+ },
+ "registry_consumers": [
+  "closed_loop_test.py",
+  "demo_planner.py",
+  "demo_planner_v29.py",
+  "eval_combo_holdout.py",
+  "eval_deployment.py",
+  "eval_p1.py",
+  "eval_p2.py",
+  "eval_p29.py",
+  "eval_teacher_realization.py",
+  "eval_v1_slices.py",
+  "export_ae_refs.py",
+  "export_planner_refs.py",
+  "gen_closure_status.py",
+  "probe_command.py"
+ ],
+ "n_registry_consumers": 14,
+ "hardcoded_checkpoint_refs": [
+  "eval_deployment.py:63"
+ ],
+ "tests": {
+  "contract_tests": 7,
+  "contact_regression": true,
+  "checkpoint_lint": false
+ },
+ "lineage": {
+  "train_groups": 5501,
+  "val_groups": 561,
+  "cross_split": 0,
+  "unparsed": 0
+ },
+ "snapshot": {
+  "tag": "planner-v1.0-audit-fixed-rc1",
+  "tracked_files": 74
+ },
+ "deployment_eval_headline": {
+  "q_mean_mrad": 25.975045961764266,
+  "q_ci95": [
+   24.492346137002702,
+   27.475973553976985
+  ],
+  "fk_mean_mm": 12.019891323350766,
+  "gain_vx": null,
+  "gain_vyaw": null,
+  "verdict": "see paired_ab_result.json (v1.1 vs RC1 on same 414 val clips)"
+ }
+}

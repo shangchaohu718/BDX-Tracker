@@ -1,0 +1,60 @@
+{
+ "plan": "SMOKE_PLAN.json (frozen 2026-09-07T01:00Z)",
+ "generated": "2026-09-07T01:16:15.063904+00:00",
+ "runtime": {
+  "use_root_height_obs": true,
+  "use_contact_in_obs_max": false,
+  "add_time_aware_observation": true,
+  "tracker": "/home/tcl/Desktop/start/BFM-zero/results/bfmzero-bdx-full"
+ },
+ "contact_introspection_ok": true,
+ "trials": [
+  {
+   "trial": 0,
+   "level": 0.3,
+   "seed_frame": 0,
+   "checks": {
+    "no_fall": true,
+    "no_termination": false,
+    "no_sustained_nonfoot_contact": true,
+    "no_sign_reversal_G2": false,
+    "steady_negative": false,
+    "stop_residual_ok": true,
+    "adapter_no_clamp": true
+   },
+   "pass": false,
+   "nominal_z": 0.22474981099367142,
+   "min_z": 0.18233443796634674,
+   "fall_max_run_steps": 0,
+   "teleport_max_step_m": 0.17816023528575897,
+   "episode_reset": true,
+   "nonfoot_contact_max_run_steps": 10,
+   "realized_vx_subwindows": [
+    0.013681268442564586,
+    0.059354427883852236,
+    -0.07734283756337401,
+    0.03622705062194353,
+    -0.030548797033805034,
+    -0.0026186437708906646,
+    0.04478578928414887,
+    -0.04385598026232415,
+    0.008259656316715557,
+    0.054791837804974736
+   ],
+   "steady_mean_vx": 0.005135643723136552,
+   "steady_abs_mean_vx": 0.030810117412143168,
+   "stop_last1s_vx_m": -0.014211348276397983,
+   "adapter_events": 0,
+   "adapter_clamped": false
+  }
+ ],
+ "level_pass": {
+  "0.3": false
+ },
+ "steady_abs_mean_vx_by_level": {
+  "0.3": 0.030810117412143168
+ },
+ "monotone_with_0.02_tol": false,
+ "envelope_decision": "UNSUPPORTED",
+ "all_12_pass": false
+}

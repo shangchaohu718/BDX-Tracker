@@ -1,0 +1,155 @@
+{
+ "generated": "2026-09-07T01:18:21.187429+00:00",
+ "ruling": "user 最终裁决 2026-09-07 (DISTILL_CANONICAL_ADOPTION_V12)",
+ "mechanical_envelope": "UNSUPPORTED",
+ "mechanical_basis": "all 12 trials FAIL frozen checks (steady-window realized velocity not negative; net displacement ~0). Frozen mapping: 全部失败 -> backward=UNSUPPORTED, adapter rejects negative vx. No thresholds edited, no resets re-picked, no retraining.",
+ "instrument_findings": {
+  "auto_reset_limit_cycle": "episode_length_buf wraps every ~22-30 steps in EVERY trial (official deployment runtime config, mirroring closed_loop_test.py verbatim: only max_episode_length_s=10000/headless/mujoco). Each wrap teleports the robot +0.10-0.18 m along +x (11-14 teleports per 10 s command segment).",
+  "steady_decomposition": [
+   {
+    "trial": 0,
+    "level": -0.15,
+    "nonreset_vx_m_s": -0.24345382116734982,
+    "n_nonreset": 287,
+    "reset_vx_m_s": 5.169540643692017,
+    "n_reset": 13,
+    "net_vx_m_s": -0.008890740718925372
+   },
+   {
+    "trial": 1,
+    "level": -0.15,
+    "nonreset_vx_m_s": -0.24962425231933594,
+    "n_nonreset": 287,
+    "reset_vx_m_s": 5.330283939838409,
+    "n_reset": 13,
+    "net_vx_m_s": -0.007828238449292257
+   },
+   {
+    "trial": 2,
+    "level": -0.15,
+    "nonreset_vx_m_s": -0.25100717321038246,
+    "n_nonreset": 287,
+    "reset_vx_m_s": 5.462320894002914,
+    "n_reset": 13,
+    "net_vx_m_s": -0.0034296190278837457
+   },
+   {
+    "trial": 3,
+    "level": -0.3,
+    "nonreset_vx_m_s": -0.2494413871318102,
+    "n_nonreset": 286,
+    "reset_vx_m_s": 5.094923824071884,
+    "n_reset": 14,
+    "net_vx_m_s": -3.770242074097041e-05
+   },
+   {
+    "trial": 4,
+    "level": -0.3,
+    "nonreset_vx_m_s": -0.2591780386865139,
+    "n_nonreset": 286,
+    "reset_vx_m_s": 5.339546874165535,
+    "n_reset": 14,
+    "net_vx_m_s": 0.002095753916364629
+   },
+   {
+    "trial": 5,
+    "level": -0.3,
+    "nonreset_vx_m_s": -0.2576799597591162,
+    "n_nonreset": 287,
+    "reset_vx_m_s": 5.264662951231003,
+    "n_reset": 13,
+    "net_vx_m_s": -0.018378444656264037
+   },
+   {
+    "trial": 6,
+    "level": -0.5,
+    "nonreset_vx_m_s": -0.3473259508609772,
+    "n_nonreset": 289,
+    "reset_vx_m_s": 8.949846774339676,
+    "n_reset": 11,
+    "net_vx_m_s": -0.006429642235161737
+   },
+   {
+    "trial": 7,
+    "level": -0.5,
+    "nonreset_vx_m_s": -0.26218125130981207,
+    "n_nonreset": 286,
+    "reset_vx_m_s": 5.357870832085609,
+    "n_reset": 14,
+    "net_vx_m_s": 8.784731448940875e-05
+   },
+   {
+    "trial": 8,
+    "level": -0.5,
+    "nonreset_vx_m_s": -0.3291024826467037,
+    "n_nonreset": 288,
+    "reset_vx_m_s": 7.89831355214119,
+    "n_reset": 12,
+    "net_vx_m_s": -5.811453007709133e-06
+   },
+   {
+    "trial": 9,
+    "level": -0.65,
+    "nonreset_vx_m_s": -0.3433948149904609,
+    "n_nonreset": 289,
+    "reset_vx_m_s": 8.662427216768265,
+    "n_reset": 11,
+    "net_vx_m_s": -0.013181324175093323
+   },
+   {
+    "trial": 10,
+    "level": -0.65,
+    "nonreset_vx_m_s": -0.30979232396930456,
+    "n_nonreset": 287,
+    "reset_vx_m_s": 7.280060648918152,
+    "n_reset": 13,
+    "net_vx_m_s": 0.01910128485178575
+   },
+   {
+    "trial": 11,
+    "level": -0.65,
+    "nonreset_vx_m_s": -0.334225851111114,
+    "n_nonreset": 288,
+    "reset_vx_m_s": 8.363225311040878,
+    "n_reset": 12,
+    "net_vx_m_s": 0.013672219938598573
+   }
+  ],
+  "forward_control_diagnostic": {
+   "dir": "20260907T0130Z_diagFwd",
+   "vx": 0.3,
+   "seed": 0,
+   "nonreset_vx_m_s": -0.25871386751532555,
+   "n_nonreset": 286,
+   "reset_vx_m_s": 5.153264477849007,
+   "n_reset": 14,
+   "net_vx_m_s": -0.006154904986033216,
+   "conclusion": "instrument cannot demonstrate NET x-locomotion in ANY direction"
+  },
+  "official_eval_corroboration": {
+   "source": "20260905T0400Z_p54_final/v12/deployment_eval.json",
+   "vx": {
+    "slope": -0.251947349939914,
+    "r2": 0.09104128749961027
+   },
+   "healthy_channels": {
+    "vy_r2": 0.948099538497279,
+    "neck_r2": 0.958933254044731
+   },
+   "reading": "x-channel pinned (~0 realized regardless of command) while y/yaw/neck vary normally -> defect is x-specific, consistent with +x auto-reset teleports. Retroactively explains v11 (-0.284/R2=0.053) AND v12 (-0.252/R2=0.091) deployment vx."
+  }
+ },
+ "capability_claim": "backward NOT refuted, NOT certified: completion-form evidence (sweep 0.90, G2 zero reversals) remains valid as completion-form; closed-loop x-motion is unmeasurable in this runtime configuration.",
+ "retest_path": "fix runtime termination regime (RUNTIME_X_AXIS_TERMINATION_LOOP; R26 precedent), then re-run this frozen SMOKE_PLAN with SYMMETRIC forward+backward trials",
+ "adapter_binding": "command_adapter v1.3 (canonical): negative velocity.forward -> CommandValidationError + durable event (reason=backward_unsupported_closed_loop_smoke).",
+ "retest_path_amendment_20260907": {
+  "by": "user terminal confirmation (final ruling)",
+  "change": "retest must be SYMMETRIC: forward AND backward on the original frozen plan; backward-only retest not acceptable",
+  "issue": "RUNTIME_X_AXIS_TERMINATION_LOOP (ISSUES/RUNTIME_X_AXIS_TERMINATION_LOOP.md), fix task only by explicit user decision"
+ },
+ "final_status_20260907": {
+  "DISTILL_CAMPAIGN": "DONE",
+  "BACKWARD_CLOSED_LOOP": "UNSUPPORTED",
+  "RUNTIME_X_AXIS_INSTRUMENT": "INVALID"
+ }
+}

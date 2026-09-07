@@ -1,0 +1,1 @@
+{"checkpoint": "p2_student_v12.pt", "teacher": "p1_ae_l64.pt", "preprocess_version": "fixed_v1", "note": "v12 smoke overlay — mirrors post-promotion registry (user ruling 2026-09-07)"}

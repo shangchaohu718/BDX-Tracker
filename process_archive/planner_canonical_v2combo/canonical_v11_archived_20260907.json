@@ -1,0 +1,71 @@
+{
+ "status": "canonical",
+ "checkpoint": "p2_student_v11.pt",
+ "teacher": "p1_ae_l64.pt",
+ "preprocess_version": "fixed_v1",
+ "stats_version": "p2_stats32.json (recomputed under fixed_v1)",
+ "checkpoint_sha256_16": "f939b2b831000fc4",
+ "teacher_sha256_16": "e77a5746ff678e44",
+ "command_interface": "7D [neck_fwd, neck_pitch, neck_yaw, neck_roll, vx, vy, vyaw] \u2014 FROZEN",
+ "capability_envelope": {
+  "vx": {
+   "min": 0.0,
+   "max": 0.5,
+   "validated": true,
+   "note": "no backward \u2014 adapter saturates with structured warning; realization is teacher's ~0.57-0.65 of requested"
+  },
+  "vy": {
+   "min": -0.2,
+   "max": 0.2,
+   "validated": true,
+   "note": "realization ~0.65 of requested (teacher ceiling)"
+  },
+  "vyaw": {
+   "min": -0.5,
+   "max": 0.5,
+   "validated": true,
+   "note": "realization ~0.54 of requested (teacher ceiling)"
+  },
+  "neck_forward": {
+   "min": 0.3,
+   "max": 0.7,
+   "validated": "home-range only",
+   "note": "nonzero commanded samples 0/414 in deployment val; wide excursions unvalidated; adapter 'up' pose DISABLED"
+  },
+  "neck_pitch": {
+   "min": -0.3,
+   "max": 0.35,
+   "validated": "partial",
+   "note": "nonzero samples 12/414; slope not individually gated"
+  },
+  "neck_yaw": {
+   "min": -0.6,
+   "max": 0.6,
+   "validated": true,
+   "note": "slope 1.03 R2 .96, nonzero samples 85/414"
+  },
+  "neck_roll": {
+   "min": 0.0,
+   "max": 0.0,
+   "validated": false,
+   "note": "nonzero commanded samples 0/414 \u2014 channel inert in deployment data"
+  },
+  "known_limitations": [
+   "backward unsupported (5 val clips show sign inversion; adapter blocks)",
+   "mid-speed vx realization 55-65% = TEACHER realization ceiling (planner/teacher 1.08)",
+   "neck_forward and neck_roll effectively unvalidated in deployment gate",
+   "GT-derived reconstruction regressed vs RC1 (q 43->84 mrad) by design",
+   "frozen-decoder manifold: new behaviors (true backward, wide strafe) require a P1 reconstruction gate BEFORE v1.2 \u2014 retraining encoder alone may not suffice",
+   "system-level closed-loop acceptance pending tracker maturity"
+  ],
+  "fk_note": "12.0 mm on canonical-frame-consistent baseline (earlier 29.4 mm was computed with mixed world-rotation/canonical-position frames \u2014 invalidated, corrected 2026-08-24)"
+ },
+ "evidence": [
+  "paired_ab_result.json",
+  "deployment_eval.json",
+  "preprocess_parity.json",
+  "AUDIT_FIX_EVIDENCE.json",
+  "closure_status.json"
+ ],
+ "date": "2026-08-24"
+}

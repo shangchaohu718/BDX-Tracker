@@ -1,0 +1,62 @@
+{
+ "generated": "2026-09-07T01:20:35.535601+00:00",
+ "action": "DISTILL_CANONICAL_ADOPTION_V12 (user ruling 2026-09-07, executed verbatim)",
+ "atomic_package": {
+  "checkpoint": {
+   "file": "p2_student_v12.pt",
+   "sha256_16": "34047cde8f6c5a3b",
+   "lineage": "train pool repaired (backward window repair, no heldout _rev/twins); P5.3/P5.4 evidence"
+  },
+  "teacher": {
+   "file": "p1_ae_l64.pt",
+   "sha256_16": "e77a5746ff678e44"
+  },
+  "normalization": [
+   "p1_stats.json",
+   "p2_stats32.json",
+   "preprocess fixed_v1",
+   "7D command interface FROZEN"
+  ],
+  "capability": {
+   "file": "humanoidverse/planner/capability_v12.py",
+   "open_loop_envelope": "ENVELOPE (validated)",
+   "closed_loop_binding": "CLOSED_LOOP_DEPLOYMENT_ENVELOPE (addeditive 2026-09-07): vx [0,0.5], negatives rejected"
+  },
+  "adapter": {
+   "file": "humanoidverse/planner/command_adapter_v13.py",
+   "semantics": "negative velocity.forward -> CommandValidationError + durable event (reason=backward_unsupported_closed_loop_smoke); positive range clamps as v1.2; no bare-checkpoint path around the envelope"
+  },
+  "lineage": "p33 artifacts + P5.4 FINAL_EVAL + v12_parity.json; v11 heldout contamination repaired",
+  "adoption_rule": "bdx_planner_distill/20260905T0400Z_p54_final/ADOPTION_RULE.json (frozen pre-results)",
+  "instrument_validity_matrix": "bdx_planner_distill/20260904T2300Z_p41_matrix/ + 2026-09-07 addendum (closed-loop x-channel INVALID: auto-reset limit cycle)",
+  "limitations": "canonical.json capability_envelope.known_limitations (7 entries)",
+  "smoke": {
+   "plan": "bdx_planner_distill/20260907T0100Z_v12smoke/SMOKE_PLAN.json (frozen pre-run)",
+   "result": "SMOKE_RESULT.json (12/12 FAIL)",
+   "disposition": "DISPOSITION.json (sha256_16 9b7cc1e6f7518290)",
+   "diagnostic": "bdx_planner_distill/20260907T0130Z_diagFwd/ (forward control: instrument cannot show net x)"
+  }
+ },
+ "registry_states": {
+  "v11": "SUPERSEDED_INVALID_LINEAGE",
+  "v13": "REJECTED_SINGLE_SIGN_REVERSAL",
+  "v12": "CANONICAL"
+ },
+ "rollback": {
+  "backup": "humanoidverse/data/bdx_planner_v2combo_preV12_backup_20260907T0930Z.tar.gz",
+  "backup_sha256_16": "9229b54e684b4e6f",
+  "superseded_pointer": "canonical_v11_archived_20260907.json"
+ },
+ "forbidden_and_respected": [
+  "adapter bypassed: NO (smoke + adapter both route through adapt())",
+  "checkpoint modified: NO",
+  "training data modified: NO",
+  "thresholds edited: NO",
+  "resets re-picked mid-run: NO",
+  "e133f9e merged: NO (OBSERVED_NOT_MERGED)",
+  "canonical data written by smoke: NO (overlay only)"
+ ],
+ "gating": "planner demo (demo_planner.mp4) human signoff pending blocks EXTERNAL_DEMO_SIGNOFF only, not ENGINEERING_CANONICAL_ADOPTION",
+ "terminal": "canonical pointer committed -> STOP. No new training campaigns auto-opened.",
+ "label_correction_20260907": "earlier 'G1 demo' label was a mislabel, removed by user order: this project (BDX distill line) has no G1-robot involvement"
+}

@@ -1,0 +1,11 @@
+{
+ "generated": "2026-08-24T10:44:45",
+ "splits_file": "/home/tcl/Desktop/start/BFM-zero/humanoidverse/data/bdx_planner_v2combo/splits.json",
+ "lineage_rules": "group_id > parent_clip > augmentation-stripped base id",
+ "train_groups": 5501,
+ "val_groups": 561,
+ "cross_split_groups": [],
+ "val_clips_in_leaked_groups": 0,
+ "unparsed_names": [],
+ "n_unparsed": 0
+}

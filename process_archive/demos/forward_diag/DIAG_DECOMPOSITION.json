@@ -1,0 +1,10 @@
+{
+ "trial": "trial00 (vx=+0.30, seed 0)",
+ "window": "steps 300-600 (steady)",
+ "nonreset_vx_m_s": -0.25871386751532555,
+ "n_nonreset": 286,
+ "reset_vx_m_s": 5.153264477849007,
+ "n_reset": 14,
+ "net_vx_m_s": -0.006154904986033216,
+ "interpretation": "non-reset drift is NEGATIVE (-0.26 m/s) under a FORWARD command: the -x drift seen in all backward trials is command-sign-independent (recovery half of the auto-reset limit cycle), NOT policy backward walking. Net x-displacement is pinned to ~0 in every trial regardless of command sign."
+}

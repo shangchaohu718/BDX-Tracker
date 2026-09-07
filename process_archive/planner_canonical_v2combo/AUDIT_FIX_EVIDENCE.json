@@ -1,0 +1,57 @@
+{
+ "date": "2026-08-21",
+ "what": "post-audit-fix retrain \u2014 full evidence record",
+ "fixes_applied": [
+  "mat_to_6d column-major (was interleaved)",
+  "compute_sparse_stats contact index 27:29 (was [-2:])",
+  "canonical_sparse base-quat de-yaw (was raw world quat)",
+  "export/demo/closedloop Rz.T inverse (was Rz \u2014 12.2\u00b0 err @174\u00b0 yaw)",
+  "AR head_angvel from head body (was base av)"
+ ],
+ "checkpoints": {
+  "teacher_fixed": {
+   "file": "p1_ae_l64.pt",
+   "sha256_16": "e77a5746ff678e44",
+   "val_total": 0.0329
+  },
+  "planner_fixed": {
+   "file": "p2_student_fixed.pt",
+   "sha256_16": "72b5df80334ef4e5",
+   "R2": 0.807
+  },
+  "legacy_marked": [
+   "legacy_audit0821_p1_ae_l64.pt",
+   "legacy_audit0821_p2_student_v2c.pt",
+   "legacy_audit0821_p2_student_p210.pt",
+   "legacy_audit0821_p2_student_p210B.pt"
+  ]
+ },
+ "contract_tests": "5/5 passed (tests/test_planner_contracts.py)",
+ "fixed_model_metrics": {
+  "velocity_tracking": {
+   "backward_dvx": 0.015,
+   "stationary_dvx": 0.006,
+   "overall_dvx": 0.01,
+   "overall_dvyaw_R_based": 0.096
+  },
+  "combo_holdout": {
+   "same_dir_dneck": 0.263,
+   "neck_degradation_x": 1.29,
+   "q_holdout_vs_train": 0.86
+  },
+  "yaw_intervention": {
+   "vx_gain_at_dyaw": {
+    "0": 0.79,
+    "45": 0.8,
+    "120": 0.76,
+    "-170": 0.81
+   },
+   "verdict": "equivariant (\u00b13% across \u00b1170\u00b0)"
+  }
+ },
+ "vs_legacy_comparison_note": "teacher val 0.0348->0.0329 (better); planner R2 0.812->0.807 (parity); combo neck 0.251->0.263 (parity); vyaw improved 0.105->0.096",
+ "pending": [
+  "P3 full frozen-test rerun with layered metrics (needs tracker GPU)",
+  "P3 expansion beyond 7 clips (blocked on tracker availability)"
+ ]
+}
