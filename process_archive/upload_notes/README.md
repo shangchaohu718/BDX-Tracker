@@ -4,9 +4,14 @@ The BDX-Tracker GitHub upload required two history rewrites because the
 original upstream repository's Git-LFS storage is missing objects
 (server-side 404, unrecoverable anywhere):
 
-1. `humanoidverse/data/lafan_29dof.zip` (151 MB): migrated OUT of LFS into a
-   regular git blob (content verified intact locally, sha256
+1. `humanoidverse/data/lafan_29dof.zip` (151 MB): original LFS object could
+   not be re-uploaded (S3 EOF on this link) and as a regular git blob it
+   exceeds GitHub's 100 MB per-file limit (GH001) — REMOVED from history
+   entirely and shipped as a GitHub Release asset instead
+   (`lafan_29dof_release_copy.zip`, sha256
    197f918087c37bca690d33d090b42c54f8ce6968ab3eac13da11f0e1b57b62df).
+   Place it back at `humanoidverse/data/lafan_29dof.zip` to reproduce the
+   human-imitation pipeline.
 2. `model/goal_inference/goal.mp4` (930 KB) and
    `model/reward_inference/move-ego-low0.6-0-0.7.mp4` (1.1 MB): original
    media lost upstream — LFS pointer blobs replaced with a one-line
